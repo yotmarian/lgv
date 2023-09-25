@@ -1,6 +1,6 @@
 use std::any;
 use std::collections::VecDeque;
-use std::iter::{Once, once};
+use std::iter::{Once, once, Repeat, Take, repeat};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -41,87 +41,34 @@ pub trait FromArrow: Sized {
     }
 }
 
-impl FromArrow for bool {
-    type Array = BooleanArray;
-    type Iter = ArrayIter<BooleanArray, bool>;
+impl FromArrow for () {
+    type Array = ArrayRef;
+    type Iter = Take<Repeat<()>>;
+
+    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
+        Ok(repeat(()).take(array.len()))
+    }
+
+    fn from_nonnull_struct(array: StructArray) -> Result<Self::Iter> {
+        Ok(repeat(()).take(array.len()))
+    }
+
+    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Iter> {
+        Ok(repeat(()).take(array.len()))
+    }
+}
+
+impl<T: HasAccessor> FromArrow for T
+where
+    for<'a> &'a T::Array: ArrayAccessor,
+{
+    type Array = T::Array;
+    type Iter = ArrayIter<T::Array, T>;
 
     fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
         Ok(ArrayIter::new(array))
     }
 }
-
-macro_rules! gen_from_arrow_simple {
-    ($($array:ident { $($native:ty:$arrow:ty)+ })+) => {
-        $($(
-            impl FromArrow for $native {
-                type Array = $array<$arrow>;
-                type Iter = ArrayIter<Self::Array, $native>;
-
-                fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-                    Ok(ArrayIter::new(array))
-                }
-            }
-        )+)+
-    };
-}
-
-gen_from_arrow_simple!(
-    PrimitiveArray {
-        i8:Int8Type i16:Int16Type i32:Int32Type i64:Int64Type
-        u8:UInt8Type u16:UInt16Type u32:UInt32Type u64:UInt64Type
-        f16:Float16Type f32:Float32Type f64:Float64Type
-    }
-
-    GenericByteArray {
-        Box<str>:Utf8Type String:Utf8Type
-        Box<[u8]>:BinaryType Vec<u8>:BinaryType
-        Large<Box<str>>:LargeUtf8Type Large<String>:LargeUtf8Type
-        Large<Box<[u8]>>:LargeBinaryType Large<Vec<u8>>:LargeBinaryType
-    }
-);
-
-macro_rules! gen_from_arrow_tuples {
-    ($($n:expr => $zip:ident ($($x:ident),+))+) => { $(
-        pub struct $zip<$($x),+>($($x),+);
-
-        impl<$($x: Iterator),+> Iterator for $zip<$($x),+> {
-            type Item = ($($x::Item),+);
-
-            #[allow(non_snake_case)]
-            fn next(&mut self) -> Option<Self::Item> {
-                let $zip($($x),+) = self;
-                Some(($($x.next()?),+))
-            }
-        }
-
-        impl<$($x: FromArrow),+> FromArrow for ($($x),+) {
-            type Array = StructArray;
-            type Iter = $zip<$($x::Iter),+>;
-
-            fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-                let mut columns = VecDeque::from(n_columns::<Self>($n, array)?);
-                Ok($zip($($x::from_any(columns.pop_front().unwrap())?),+))
-            }
-        }
-    )+ };
-}
-
-gen_from_arrow_tuples!(
-    2 => Zip2 (A, B)
-    3 => Zip3 (A, B, C)
-    4 => Zip4 (A, B, C, D)
-    5 => Zip5 (A, B, C, D, E)
-    6 => Zip6 (A, B, C, D, E, F)
-    7 => Zip7 (A, B, C, D, E, F, G)
-    8 => Zip8 (A, B, C, D, E, F, G, H)
-    9 => Zip9 (A, B, C, D, E, F, G, H, I)
-    10 => Zip10 (A, B, C, D, E, F, G, H, I, J)
-    11 => Zip11 (A, B, C, D, E, F, G, H, I, J, K)
-    12 => Zip12 (A, B, C, D, E, F, G, H, I, J, K, L)
-    13 => Zip13 (A, B, C, D, E, F, G, H, I, J, K, L, M)
-    14 => Zip14 (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
-    15 => Zip15 (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
-);
 
 impl<T: FromArrow> FromArrow for Option<T> {
     type Array = T::Array;
@@ -184,23 +131,131 @@ impl FromArrow for ArrayRef {
     }
 }
 
+macro_rules! gen_from_arrow_tuples {
+    ($($n:expr => $zip:ident ($($x:ident),+))+) => { $(
+        pub struct $zip<$($x),+>($($x),+);
+
+        impl<$($x: Iterator),+> Iterator for $zip<$($x),+> {
+            type Item = ($($x::Item),+);
+
+            #[allow(non_snake_case)]
+            fn next(&mut self) -> Option<Self::Item> {
+                let $zip($($x),+) = self;
+                Some(($($x.next()?),+))
+            }
+        }
+
+        impl<$($x: FromArrow),+> FromArrow for ($($x),+) {
+            type Array = StructArray;
+            type Iter = $zip<$($x::Iter),+>;
+
+            fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
+                let mut columns = VecDeque::from(n_columns::<Self>($n, array)?);
+                Ok($zip($($x::from_any(columns.pop_front().unwrap())?),+))
+            }
+        }
+    )+ };
+}
+
+gen_from_arrow_tuples!(
+    2 => Zip2 (A, B)
+    3 => Zip3 (A, B, C)
+    4 => Zip4 (A, B, C, D)
+    5 => Zip5 (A, B, C, D, E)
+    6 => Zip6 (A, B, C, D, E, F)
+    7 => Zip7 (A, B, C, D, E, F, G)
+    8 => Zip8 (A, B, C, D, E, F, G, H)
+    9 => Zip9 (A, B, C, D, E, F, G, H, I)
+    10 => Zip10 (A, B, C, D, E, F, G, H, I, J)
+    11 => Zip11 (A, B, C, D, E, F, G, H, I, J, K)
+    12 => Zip12 (A, B, C, D, E, F, G, H, I, J, K, L)
+    13 => Zip13 (A, B, C, D, E, F, G, H, I, J, K, L, M)
+    14 => Zip14 (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
+    15 => Zip15 (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
+);
+
+// -----------------------------------------------------------------------------
+
+pub trait HasAccessor
+where
+    Self::Array: Array + Clone + 'static,
+    for<'a> &'a Self::Array: ArrayAccessor,
+    for<'a> Self: From<<&'a Self::Array as ArrayAccessor>::Item>,
+{
+    type Array;
+}
+
+impl HasAccessor for bool { type Array = BooleanArray; }
+
+macro_rules! impl_has_accessor {
+    { $($array:ident { $($native:ty:$arrow:ty)+ })+ } => {
+        $($(impl HasAccessor for $native { type Array = $array<$arrow>; })+)+
+    };
+}
+
+impl_has_accessor! {
+    PrimitiveArray {
+        i8:Int8Type  i16:Int16Type  i32:Int32Type  i64:Int64Type
+        u8:UInt8Type u16:UInt16Type u32:UInt32Type u64:UInt64Type
+
+        f16:Float16Type
+        f32:Float32Type
+        f64:Float64Type
+
+        Date<i32>:Date32Type
+        Date<i64>:Date64Type
+    }
+
+    GenericByteArray {
+        Box<str>:Utf8Type
+        String:Utf8Type
+
+        Box<[u8]>:BinaryType
+        Vec<u8>:BinaryType
+
+        Large<Box<str>>:LargeUtf8Type
+        Large<String>:LargeUtf8Type
+
+        Large<Box<[u8]>>:LargeBinaryType
+        Large<Vec<u8>>:LargeBinaryType
+    }
+}
+
+pub struct Date<T>(pub T);
+
+impl<T> From<T> for Date<T> {
+    fn from(value: T) -> Self {
+        Date(value)
+    }
+}
+
+pub struct Large<T>(pub T);
+
+impl<'a, T, S: ?Sized> From<&'a S> for Large<T>
+where
+    for<'b> T: From<&'b S>,
+{
+    fn from(value: &'a S) -> Self {
+        Large(T::from(value))
+    }
+}
+
 // -----------------------------------------------------------------------------
 
 pub struct Primitive<T: ArrowPrimitiveType>(pub T::Native);
 
-impl<T: ArrowPrimitiveType> Wrapper<T::Native> for Primitive<T> {
-    fn wrap(value: T::Native) -> Self {
+impl<N, T> From<N> for Primitive<T>
+where
+    N: ArrowNativeType,
+    T: ArrowPrimitiveType<Native=N>,
+{
+    fn from(value: N) -> Self {
         Primitive(value)
     }
 }
 
-impl<T: ArrowPrimitiveType> FromArrow for Primitive<T> {
+impl<T: ArrowPrimitiveType> HasAccessor for Primitive<T> {
     type Array = PrimitiveArray<T>;
-    type Iter = Map<ArrayIter<Self::Array, T::Native>, FuncWrap<Primitive<T>>>;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(map(ArrayIter::new(array)))
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -226,18 +281,12 @@ where
     }
 }
 
-impl<T, U> FromArrow for Bytes<T, U>
+impl<'a, T, U> HasAccessor for Bytes<T, U>
 where
     T: ByteArrayType,
-    for<'a> &'a GenericByteArray<T>: ArrayAccessor<Item=&'a T::Native>,
-    for<'a> U: From<&'a T::Native>,
+    for<'b> U: From<&'b T::Native>,
 {
     type Array = GenericByteArray<T>;
-    type Iter = ArrayIter<Self::Array, Bytes<T, U>>;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(ArrayIter::new(array))
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -246,23 +295,18 @@ pub struct FixedSizeBytes<T>(pub T);
 
 impl<'a, T> From<&'a [u8]> for FixedSizeBytes<T>
 where
-    T: From<&'a [u8]>,
+    for<'b> T: From<&'b [u8]>,
 {
     fn from(value: &'a [u8]) -> FixedSizeBytes<T> {
         FixedSizeBytes(T::from(value))
     }
 }
 
-impl<T> FromArrow for FixedSizeBytes<T>
+impl<'a, T> HasAccessor for FixedSizeBytes<T>
 where
-    for<'a> T: From<&'a [u8]>,
+    for<'b> T: From<&'b [u8]>,
 {
     type Array = FixedSizeBinaryArray;
-    type Iter = ArrayIter<Self::Array, FixedSizeBytes<T>>;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(ArrayIter::new(array))
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -278,45 +322,148 @@ impl<T: FromArrow, O> List<T, O> {
     }
 }
 
-impl<T: FromArrow, O> Wrapper<Result<T::Iter>> for List<T, O> {
-    fn wrap(value: Result<T::Iter>) -> Self {
-        List::new(value)
+impl<T: FromArrow, O> From<ArrayRef> for List<T, O> {
+    fn from(value: ArrayRef) -> Self {
+        Self::new(T::from_any(value))
     }
 }
 
-impl<T, O> FromArrow for List<T, O>
-where
-    T: FromArrow,
-    O: OffsetSizeTrait,
-{
+impl<T: FromArrow, O: OffsetSizeTrait> HasAccessor for List<T, O> {
     type Array = GenericListArray<O>;
-    type Iter = Map<ArrayIter<Self::Array, ArrayRef>, Compose<FuncWrap<List<T, O>>, FuncFromAny<T>>>;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(map(ArrayIter::new(array)))
-    }
 }
 
 // -----------------------------------------------------------------------------
 
-pub struct Large<T>(pub T);
+pub trait TimeUnit {
+    type Timestamp: ArrowPrimitiveType;
+    type Time: ArrowPrimitiveType;
+    type Duration: ArrowPrimitiveType;
+}
 
-impl<'a, T> From<&'a str> for Large<T>
+pub struct Second;
+pub struct Millisecond;
+pub struct Microsecond;
+pub struct Nanosecond;
+
+impl TimeUnit for Second {
+    type Timestamp = TimestampSecondType;
+    type Time = Time32SecondType;
+    type Duration = DurationSecondType;
+}
+
+impl TimeUnit for Millisecond {
+    type Timestamp = TimestampMillisecondType;
+    type Time = Time32MillisecondType;
+    type Duration = DurationMillisecondType;
+}
+
+impl TimeUnit for Microsecond {
+    type Timestamp = TimestampMicrosecondType;
+    type Time = Time64MicrosecondType;
+    type Duration = DurationMicrosecondType;
+}
+
+impl TimeUnit for Nanosecond {
+    type Timestamp = TimestampNanosecondType;
+    type Time = Time64NanosecondType;
+    type Duration = DurationNanosecondType;
+}
+
+pub trait IntervalUnit {
+    type Interval: ArrowPrimitiveType;
+}
+
+pub struct YearMonth;
+pub struct DayTime;
+pub struct MonthDayNano;
+
+impl IntervalUnit for YearMonth { type Interval = IntervalYearMonthType; }
+impl IntervalUnit for DayTime { type Interval = IntervalDayTimeType; }
+impl IntervalUnit for MonthDayNano { type Interval = IntervalMonthDayNanoType; }
+
+pub struct Timestamp<T: TimeUnit>(<T::Timestamp as ArrowPrimitiveType>::Native);
+pub struct Time<T: TimeUnit>(<T::Time as ArrowPrimitiveType>::Native);
+pub struct Duration<T: TimeUnit>(<T::Duration as ArrowPrimitiveType>::Native);
+pub struct Interval<T: IntervalUnit>(<T::Interval as ArrowPrimitiveType>::Native);
+
+impl<N, T> From<N> for Timestamp<T>
 where
-    T: From<&'a str>,
+    N: ArrowNativeType,
+    T: TimeUnit,
+    T::Timestamp: ArrowPrimitiveType<Native=N>
 {
-    fn from(value: &'a str) -> Self {
-        Large(T::from(value))
+    fn from(value: N) -> Self {
+        Timestamp(value)
     }
 }
 
-impl<'a, T> From<&'a [u8]> for Large<T>
+impl<N, T> From<N> for Time<T>
 where
-    T: From<&'a [u8]>,
+    N: ArrowNativeType,
+    T: TimeUnit,
+    T::Time: ArrowPrimitiveType<Native=N>
 {
-    fn from(value: &'a [u8]) -> Self {
-        Large(T::from(value))
+    fn from(value: N) -> Self {
+        Time(value)
     }
+}
+
+impl<N, T> From<N> for Duration<T>
+where
+    N: ArrowNativeType,
+    T: TimeUnit,
+    T::Duration: ArrowPrimitiveType<Native=N>
+{
+    fn from(value: N) -> Self {
+        Duration(value)
+    }
+}
+
+impl<N, T> From<N> for Interval<T>
+where
+    N: ArrowNativeType,
+    T: IntervalUnit,
+    T::Interval: ArrowPrimitiveType<Native=N>
+{
+    fn from(value: N) -> Self {
+        Interval(value)
+    }
+}
+
+impl<N, T> HasAccessor for Timestamp<T>
+where
+    N: ArrowNativeType,
+    T: TimeUnit,
+    T::Timestamp: ArrowPrimitiveType<Native=N>
+{
+    type Array = PrimitiveArray<T::Timestamp>;
+}
+
+impl<N, T> HasAccessor for Time<T>
+where
+    N: ArrowNativeType,
+    T: TimeUnit,
+    T::Time: ArrowPrimitiveType<Native=N>
+{
+    type Array = PrimitiveArray<T::Time>;
+}
+
+impl<N, T> HasAccessor for Duration<T>
+where
+    N: ArrowNativeType,
+    T: TimeUnit,
+    T::Duration: ArrowPrimitiveType<Native=N>
+{
+    type Array = PrimitiveArray<T::Duration>;
+}
+
+impl<N, T> HasAccessor for Interval<T>
+where
+    N: ArrowNativeType,
+    T: IntervalUnit,
+    T::Interval: ArrowPrimitiveType<Native=N>
+{
+    type Array = PrimitiveArray<T::Interval>;
 }
 
 // -----------------------------------------------------------------------------
@@ -392,87 +539,11 @@ impl<I: Iterator> Iterator for Mask<I> {
 
 // -----------------------------------------------------------------------------
 
-pub trait Function<A> {
-    type Output;
-    fn call(args: A) -> Self::Output; 
-}
-
-pub struct Map<I, F>(I, PhantomData<F>);
-
-impl<I, F> Iterator for Map<I, F>
-where
-    I: Iterator,
-    F: Function<I::Item>,
-{
-    type Item = F::Output;
-
-    fn next(&mut self) -> Option<F::Output> {
-        Some(F::call(self.0.next()?))
-    }
-}
-
-fn map<F, I>(iter: I) -> Map<I, F> {
-    Map(iter, PhantomData)
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct FuncFromAny<T>(PhantomData<T>);
-
-impl<T: FromArrow> Function<ArrayRef> for FuncFromAny<T> {
-    type Output = Result<T::Iter>;
-
-    fn call(args: ArrayRef) -> Self::Output {
-        T::from_any(args)
-    }
-}
-
-// -----------------------------------------------------------------------------
-
-trait Wrapper<T> {
-    fn wrap(value: T) -> Self;
-}
-
-pub struct FuncWrap<T>(PhantomData<T>);
-
-impl<I, T: Wrapper<I>> Function<I> for FuncWrap<T> {
-    type Output = T;
-
-    fn call(args: I) -> Self::Output {
-        T::wrap(args)
-    }
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct Compose<F, G>(PhantomData<F>, PhantomData<G>);
-
-impl<A, F, G> Function<A> for Compose<F, G>
-where
-    F: Function<G::Output>,
-    G: Function<A>,
-{
-    type Output = F::Output;
-
-    fn call(args: A) -> F::Output {
-        F::call(G::call(args))
-    }
-}
-
-// -----------------------------------------------------------------------------
-
 fn null_check<T, A: Array>(array: &A) -> Result<()> {
-    if has_nulls(array.nulls()) {
+    if array.null_count() != 0 {
         Err(err_null::<T, A>())
     } else {
         Ok(())
-    }
-}
-
-fn has_nulls(buf: Option<&NullBuffer>) -> bool {
-    match buf {
-        Some(nb) => nb.null_count() != 0,
-        None => false,
     }
 }
 
