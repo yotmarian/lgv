@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.75"
 arrow = "41.0.0"
+duckdb = { version = "0.8.1", features = ["uuid"] }
 half = "2.3.1"
+uuid = "1.4.1"

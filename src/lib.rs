@@ -1,1 +1,4 @@
-pub mod arrow;
+mod arrow;
+mod duckdb;
+pub use arrow::*;
+pub use duckdb::*;
