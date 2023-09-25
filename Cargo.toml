@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+arrow = "41.0.0"
+half = "2.3.1"
