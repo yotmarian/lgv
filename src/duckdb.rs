@@ -17,74 +17,78 @@ pub type DuckError = duckdb::Error;
 pub type DuckStatement<'conn> = duckdb::Statement<'conn>;
 pub type DuckResult<T> = duckdb::Result<T>;
 
-pub fn has_table(conn: &Connection) -> Result<QueryRow<&str, bool>> {
-    let sql = "
+pub trait Spec<'a> {
+    type Params: Params;
+    type Results: FromArrow;
+    const SQL: &'static str;
+}
+
+pub struct HasTable;
+
+impl<'a> Spec<'a> for HasTable {
+    type Params = &'a str;
+    type Results = bool;
+
+    const SQL: &'static str = "
         select count(*) == 1
         from information_schema.tables
-        where table_name = ?
+        where table_name = $1
     ";
-
-    QueryRow::new(conn, sql)
 }
 
 // -----------------------------------------------------------------------------
 
-pub struct Statement<'conn, P: Params> {
+pub struct Statement<'conn, S> {
     duck: DuckStatement<'conn>,
-    sql: &'static str,
-    phantom: PhantomData<fn(P)>,
+    phantom: PhantomData<S>,
 }
 
-impl<'conn, P: Params> Statement<'conn, P> {
-    pub fn new(conn: &'conn Connection, sql: &'static str) -> Result<Statement<'conn, P>> {
-        let duck = conn.prepare(sql).context(sql)?;
-        duck.column_count();
-        Ok(Statement { duck, sql, phantom: PhantomData })
+impl<'a, 'conn, S: Spec<'a>> Statement<'conn, S> {
+    pub fn new(conn: &'conn Connection) -> Result<Statement<'conn, S>> {
+        let duck = conn.prepare(S::SQL).context(S::SQL)?;
+        Ok(Statement { duck, phantom: PhantomData })
     }
 
-    pub fn execute<'a>(&'a mut self, params: P) -> Result<usize> {
+    pub fn execute(&mut self, params: S::Params) -> Result<usize> {
         params.bind(&mut self.duck)
             .and_then(|()| self.duck.raw_execute())
-            .context(self.sql)
+            .context(S::SQL)
     }
 }
 
 // -----------------------------------------------------------------------------
 
-pub struct Query<'conn, P: Params, R: FromArrow> {
-    stmt: Statement<'conn, P>,
-    phantom: PhantomData<fn(P) -> R>,
-}
+pub struct Query<'conn, S>(Statement<'conn, S>);
 
-impl<'conn, P: Params, R: FromArrow> Query<'conn, P, R> {
-    pub fn new(conn: &'conn Connection, sql: &'static str) -> Result<Query<'conn, P, R>> {
-        Ok(Query { stmt: Statement::new(conn, sql)?, phantom: PhantomData })
+impl<'a, 'conn, S: Spec<'a>> Query<'conn, S> {
+    pub fn new(conn: &'conn Connection) -> Result<Query<'conn, S>> {
+        Ok(Query(Statement::new(conn)?))
     }
 
-    pub fn execute(&mut self, params: P) -> Result<QueryResults<'_, 'conn, R>> {
-        self.stmt.execute(params)?;
+    pub fn execute(&mut self, params: S::Params) -> Result<QueryResults<'_, 'conn, S::Results>> {
+        self.0.execute(params)?;
 
         Ok(QueryResults {
-            statement: &mut self.stmt.duck,
+            statement: &mut self.0.duck,
             rows: None,
-            sql: self.stmt.sql,
+            sql: S::SQL,
         })
     }
 }
 
 // -----------------------------------------------------------------------------
 
-pub struct QueryRow<'conn, P: Params, R: FromArrow>(Query<'conn, P, R>);
+pub struct QueryRow<'conn, S>(Query<'conn, S>);
 
-impl<'conn, P: Params, R: FromArrow> QueryRow<'conn, P, R> {
-    pub fn new(conn: &'conn Connection, sql: &'static str) -> Result<QueryRow<'conn, P, R>> {
-        Ok(QueryRow(Query::new(conn, sql)?))
+impl<'a, 'conn, S: Spec<'a>> QueryRow<'conn, S> {
+    pub fn new(conn: &'conn Connection) -> Result<QueryRow<'conn, S>> {
+        Ok(QueryRow(Query::new(conn)?))
     }
 
-    pub fn execute(&mut self, params: P) -> Result<R> {
+    pub fn execute(&mut self, params: S::Params) -> Result<S::Results> {
         match self.0.execute(params)?.next() {
             Some(row) => row,
-            None => Err(DuckError::QueryReturnedNoRows).context(self.0.stmt.sql),
+            None => Err(DuckError::QueryReturnedNoRows).context(S::SQL),
         }
     }
 }
