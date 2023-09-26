@@ -9,7 +9,7 @@ use duckdb::{ToSql, Connection};
 use duckdb::types::{Value, Null};
 use uuid::Uuid;
 
-use crate::arrow::FromArrow;
+use crate::arrow::*;
 
 pub type DuckNull = Null;
 pub type DuckValue = Value;
@@ -97,7 +97,7 @@ impl<'a, 'conn, S: Spec<'a>> QueryRow<'conn, S> {
 
 pub struct QueryResults<'a, 'conn, R: FromArrow> {
     statement: &'a mut DuckStatement<'conn>,
-    rows: Option<R::Iter>,
+    rows: Option<Iter<R>>,
     sql: &'static str,
 }
 
@@ -114,9 +114,9 @@ impl<'a, 'conn, R: FromArrow> Iterator for QueryResults<'a, 'conn, R> {
                 }
             }
 
-            match R::from_struct(self.statement.step()?) {
-                Ok(rows) => self.rows = Some(rows),
-                Err(e) => return Some(Err(e).context(self.sql))
+            match Accessor::from_struct(self.statement.step()?) {
+                Ok(rows) => self.rows = Some(rows.into_iter()),
+                Err(e) => return Some(Err(e).context(self.sql)),
             }
         }
     }

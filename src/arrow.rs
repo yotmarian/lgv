@@ -1,8 +1,6 @@
 use std::any;
 use std::collections::VecDeque;
-use std::iter::{Once, once, Repeat, Take, repeat};
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use arrow::array::*;
 use arrow::buffer::NullBuffer;
@@ -10,32 +8,120 @@ use arrow::datatypes::*;
 use arrow::error::{Result, ArrowError};
 use half::f16;
 
+pub struct Accessor<T: FromArrow>(T::Accessor);
+
+impl<T: FromArrow> Accessor<T> {
+    pub fn from_array(array: T::Array) -> Result<Self> {
+        Ok(Accessor(T::from_array(array)?))
+    }
+
+    pub fn from_struct(array: StructArray) -> Result<Self> {
+        Ok(Accessor(T::from_struct(array)?))
+    }
+
+    pub fn from_any(array: ArrayRef) -> Result<Self> {
+        Ok(Accessor(T::from_any(array)?))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn get(&self, i: usize) -> Option<T> {
+        if i < self.len() {
+            Some(unsafe { self.0.get_unchecked(i) })
+        } else {
+            None
+        }
+    }
+
+    pub unsafe fn get_unchecked(&self, i: usize) -> T {
+        self.0.get_unchecked(i)
+    }
+}
+
+impl<T: FromArrow> IntoIterator for Accessor<T> {
+    type Item = T;
+    type IntoIter = Iter<T>;
+
+    fn into_iter(self) -> Iter<T> {
+        Iter::new(self.0)
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+pub struct Iter<T: FromArrow> {
+    i: usize,
+    accessor: T::Accessor,
+}
+
+impl<T: FromArrow> Iter<T> {
+    pub fn new(accessor: T::Accessor) -> Self {
+        Iter { i: 0, accessor }
+    }
+}
+
+impl<T: FromArrow> Iterator for Iter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        if self.i < self.accessor.len() {
+            let x = unsafe { self.accessor.get_unchecked(self.i) };
+            self.i += 1;
+            Some(x)
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let size = self.len();
+        (size, Some(size))
+    }
+}
+
+impl<T: FromArrow> ExactSizeIterator for Iter<T> {
+    fn len(&self) -> usize {
+        self.accessor.len() - self.i
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+pub trait InternalAccessor {
+    type Item;
+    fn len(&self) -> usize;
+    unsafe fn get_unchecked(&self, i: usize) -> Self::Item;
+}
+
 pub trait FromArrow: Sized {
     type Array: Array + Clone + 'static;
-    type Iter: Iterator<Item = Self>;
+    type Accessor: InternalAccessor<Item = Self>;
+    const STRUCT: bool;
 
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter>;
+    fn from_nonnull_array(array: Self::Array) -> Result<Self::Accessor>;
 
-    fn from_array(array: Self::Array) -> Result<Self::Iter> {
+    fn from_array(array: Self::Array) -> Result<Self::Accessor> {
         null_check::<Self, _>(&array)?;
         Self::from_nonnull_array(array)
     }
 
-    fn from_nonnull_struct(array: StructArray) -> Result<Self::Iter> {
+    fn from_nonnull_struct(array: StructArray) -> Result<Self::Accessor> {
         let mut columns = n_columns::<Self>(1, array)?;
         Self::from_any(columns.pop().unwrap())
     }
 
-    fn from_struct(array: StructArray) -> Result<Self::Iter> {
+    fn from_struct(array: StructArray) -> Result<Self::Accessor> {
         null_check::<Self, _>(&array)?;
         Self::from_nonnull_struct(array)
     }
 
-    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Iter> {
+    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Accessor> {
         Self::from_nonnull_array(downcast::<Self>(array)?)
     }
 
-    fn from_any(array: ArrayRef) -> Result<Self::Iter> {
+    fn from_any(array: ArrayRef) -> Result<Self::Accessor> {
         null_check::<Self, _>(&array)?;
         Self::from_nonnull_any(array)
     }
@@ -43,140 +129,138 @@ pub trait FromArrow: Sized {
 
 impl FromArrow for () {
     type Array = ArrayRef;
-    type Iter = Take<Repeat<()>>;
+    type Accessor = UnitAccessor;
+    const STRUCT: bool = false;
 
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(repeat(()).take(array.len()))
+    fn from_nonnull_array(array: ArrayRef) -> Result<UnitAccessor> {
+        Ok(UnitAccessor::new(array))
     }
 
-    fn from_nonnull_struct(array: StructArray) -> Result<Self::Iter> {
-        Ok(repeat(()).take(array.len()))
+    fn from_nonnull_struct(array: StructArray) -> Result<UnitAccessor> {
+        Ok(UnitAccessor::new(array))
     }
 
-    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Iter> {
-        Ok(repeat(()).take(array.len()))
+    fn from_nonnull_any(array: ArrayRef) -> Result<UnitAccessor> {
+        Ok(UnitAccessor::new(array))
     }
 }
 
-impl<T: HasAccessor> FromArrow for T
+impl<T: DirectAccess> FromArrow for T
 where
     for<'a> &'a T::Array: ArrayAccessor,
 {
     type Array = T::Array;
-    type Iter = ArrayIter<T::Array, T>;
+    type Accessor = DirectAccessor<T::Array, T>;
+    const STRUCT: bool = false;
 
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(ArrayIter::new(array))
+    fn from_nonnull_array(array: Self::Array) -> Result<Self::Accessor> {
+        Ok(DirectAccessor::new(array))
     }
 }
 
 impl<T: FromArrow> FromArrow for Option<T> {
     type Array = T::Array;
-    type Iter = Mask<T::Iter>;
+    type Accessor = MaskedAccessor<T::Accessor>;
+    const STRUCT: bool = T::STRUCT;
 
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(Mask::new(T::from_nonnull_array(array)?, None))
+    fn from_nonnull_array(array: Self::Array) -> Result<Self::Accessor> {
+        Ok(MaskedAccessor::new(T::from_nonnull_array(array)?, None))
     }
 
-    fn from_array(array: Self::Array) -> Result<Self::Iter> {
-        let nulls = array.nulls().map(|r| r.clone());
-        Ok(Mask::new(T::from_nonnull_array(array)?, nulls))
+    fn from_array(array: Self::Array) -> Result<Self::Accessor> {
+        let nulls = clone_nulls(&array);
+        Ok(MaskedAccessor::new(T::from_nonnull_array(array)?, nulls))
     }
 
-    fn from_nonnull_struct(array: StructArray) -> Result<Self::Iter> {
-        Ok(Mask::new(T::from_nonnull_struct(array)?, None))
+    fn from_nonnull_struct(array: StructArray) -> Result<Self::Accessor> {
+        if T::STRUCT || array.num_columns() > 1 {
+            Ok(MaskedAccessor::new(T::from_nonnull_struct(array)?, None))
+        } else {
+            Self::from_any(n_columns::<Self>(1, array)?.pop().unwrap())
+        }
     }
 
-    fn from_struct(array: StructArray) -> Result<Self::Iter> {
-        let nulls = array.nulls().map(|r| r.clone());
-        Ok(Mask::new(T::from_nonnull_struct(array)?, nulls))
+    fn from_struct(array: StructArray) -> Result<Self::Accessor> {
+        let nulls = clone_nulls(&array);
+
+        if T::STRUCT || array.num_columns() > 1 {
+            Ok(MaskedAccessor::new(T::from_nonnull_struct(array)?, nulls))
+        } else {
+            let column = n_columns::<Self>(1, array)?.pop().unwrap();
+            let inner = Self::from_any(column)?;
+            Ok(inner.union_nulls(nulls))
+        }
     }
 
-    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Iter> {
-        Ok(Mask::new(T::from_nonnull_any(array)?, None))
+    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Accessor> {
+        Self::from_any(array)
     }
 
-    fn from_any(array: ArrayRef) -> Result<Self::Iter> {
-        let nulls = array.nulls().map(|r| r.clone());
-        Ok(Mask::new(T::from_nonnull_any(array)?, nulls))
-    }
-}
+    fn from_any(array: ArrayRef) -> Result<Self::Accessor> {
+        if let Some(nulls) = array.as_any().downcast_ref::<NullArray>() {
+            return Ok(MaskedAccessor::from_nulls(nulls));
+        }
 
-impl FromArrow for ArrayRef {
-    type Array = ArrayRef;
-    type Iter = Once<ArrayRef>;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(once(array))
-    }
-
-    fn from_array(array: Self::Array) -> Result<Self::Iter> {
-        Ok(once(array))
-    }
-
-    fn from_nonnull_struct(array: StructArray) -> Result<Self::Iter> {
-        Ok(once(Arc::new(array)))
-    }
-
-    fn from_struct(array: StructArray) -> Result<Self::Iter> {
-        Ok(once(Arc::new(array)))
-    }
-
-    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Iter> {
-        Ok(once(array))
-    }
-
-    fn from_any(array: ArrayRef) -> Result<Self::Iter> {
-        Ok(once(array))
+        let nulls = clone_nulls(&array);
+        Ok(MaskedAccessor::new(T::from_nonnull_any(array)?, nulls))
     }
 }
 
-macro_rules! gen_from_arrow_tuples {
-    ($($n:expr => $zip:ident ($($x:ident),+))+) => { $(
-        pub struct $zip<$($x),+>($($x),+);
+macro_rules! impl_from_arrow {
+    { $($n:expr => $ta:ident ($($x:ident),+$(,)?))+ } => { $(
+        pub struct $ta<$($x: FromArrow),+>(usize, $($x::Accessor),+);
 
-        impl<$($x: Iterator),+> Iterator for $zip<$($x),+> {
-            type Item = ($($x::Item),+);
+        impl<$($x: FromArrow),+> InternalAccessor for $ta<$($x),+> {
+            type Item = ($($x,)+);
+
+            fn len(&self) -> usize {
+                self.0
+            }
 
             #[allow(non_snake_case)]
-            fn next(&mut self) -> Option<Self::Item> {
-                let $zip($($x),+) = self;
-                Some(($($x.next()?),+))
+            unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
+                let $ta(_, $($x),+) = self;
+                ($($x.get_unchecked(i),)+)
             }
         }
 
-        impl<$($x: FromArrow),+> FromArrow for ($($x),+) {
+        impl<$($x: FromArrow),+> FromArrow for ($($x,)+) {
             type Array = StructArray;
-            type Iter = $zip<$($x::Iter),+>;
+            type Accessor = $ta<$($x),+>;
+            const STRUCT: bool = true;
 
-            fn from_nonnull_array(array: Self::Array) -> Result<Self::Iter> {
+            fn from_nonnull_array(array: StructArray) -> Result<Self::Accessor> {
+                let len = array.len();
                 let mut columns = VecDeque::from(n_columns::<Self>($n, array)?);
-                Ok($zip($($x::from_any(columns.pop_front().unwrap())?),+))
+                Ok($ta(len, $(
+                    $x::from_any(columns.pop_front().unwrap())?
+                ),+))
             }
         }
     )+ };
 }
 
-gen_from_arrow_tuples!(
-    2 => Zip2 (A, B)
-    3 => Zip3 (A, B, C)
-    4 => Zip4 (A, B, C, D)
-    5 => Zip5 (A, B, C, D, E)
-    6 => Zip6 (A, B, C, D, E, F)
-    7 => Zip7 (A, B, C, D, E, F, G)
-    8 => Zip8 (A, B, C, D, E, F, G, H)
-    9 => Zip9 (A, B, C, D, E, F, G, H, I)
-    10 => Zip10 (A, B, C, D, E, F, G, H, I, J)
-    11 => Zip11 (A, B, C, D, E, F, G, H, I, J, K)
-    12 => Zip12 (A, B, C, D, E, F, G, H, I, J, K, L)
-    13 => Zip13 (A, B, C, D, E, F, G, H, I, J, K, L, M)
-    14 => Zip14 (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
-    15 => Zip15 (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
-);
+impl_from_arrow! {
+    1 => TA1 (A,)
+    2 => TA2 (A, B)
+    3 => TA3 (A, B, C)
+    4 => TA4 (A, B, C, D)
+    5 => TA5 (A, B, C, D, E)
+    6 => TA6 (A, B, C, D, E, F)
+    7 => TA7 (A, B, C, D, E, F, G)
+    8 => TA8 (A, B, C, D, E, F, G, H)
+    9 => TA9 (A, B, C, D, E, F, G, H, I)
+    10 => TA10 (A, B, C, D, E, F, G, H, I, J)
+    11 => TA11 (A, B, C, D, E, F, G, H, I, J, K)
+    12 => TA12 (A, B, C, D, E, F, G, H, I, J, K, L)
+    13 => TA13 (A, B, C, D, E, F, G, H, I, J, K, L, M)
+    14 => TA14 (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
+    15 => TA15 (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
+}
 
 // -----------------------------------------------------------------------------
 
-pub trait HasAccessor
+pub trait DirectAccess
 where
     Self::Array: Array + Clone + 'static,
     for<'a> &'a Self::Array: ArrayAccessor,
@@ -185,11 +269,11 @@ where
     type Array;
 }
 
-impl HasAccessor for bool { type Array = BooleanArray; }
+impl DirectAccess for bool { type Array = BooleanArray; }
 
 macro_rules! impl_has_accessor {
     { $($array:ident { $($native:ty:$arrow:ty)+ })+ } => {
-        $($(impl HasAccessor for $native { type Array = $array<$arrow>; })+)+
+        $($(impl DirectAccess for $native { type Array = $array<$arrow>; })+)+
     };
 }
 
@@ -254,7 +338,7 @@ where
     }
 }
 
-impl<T: ArrowPrimitiveType> HasAccessor for Primitive<T> {
+impl<T: ArrowPrimitiveType> DirectAccess for Primitive<T> {
     type Array = PrimitiveArray<T>;
 }
 
@@ -281,7 +365,7 @@ where
     }
 }
 
-impl<'a, T, U> HasAccessor for Bytes<T, U>
+impl<'a, T, U> DirectAccess for Bytes<T, U>
 where
     T: ByteArrayType,
     for<'b> U: From<&'b T::Native>,
@@ -302,7 +386,7 @@ where
     }
 }
 
-impl<'a, T> HasAccessor for FixedSizeBytes<T>
+impl<'a, T> DirectAccess for FixedSizeBytes<T>
 where
     for<'b> T: From<&'b [u8]>,
 {
@@ -312,23 +396,23 @@ where
 // -----------------------------------------------------------------------------
 
 pub struct List<T: FromArrow, O = i32> {
-    pub value: Result<T::Iter>,
+    pub value: Result<Accessor<T>>,
     phantom: PhantomData<O>,
 }
 
 impl<T: FromArrow, O> List<T, O> {
-    pub fn new(value: Result<T::Iter>) -> Self {
+    pub fn new(value: Result<Accessor<T>>) -> Self {
         List { value, phantom: PhantomData }
     }
 }
 
 impl<T: FromArrow, O> From<ArrayRef> for List<T, O> {
     fn from(value: ArrayRef) -> Self {
-        Self::new(T::from_any(value))
+        Self::new(Accessor::from_any(value))
     }
 }
 
-impl<T: FromArrow, O: OffsetSizeTrait> HasAccessor for List<T, O> {
+impl<T: FromArrow, O: OffsetSizeTrait> DirectAccess for List<T, O> {
     type Array = GenericListArray<O>;
 }
 
@@ -430,7 +514,7 @@ where
     }
 }
 
-impl<N, T> HasAccessor for Timestamp<T>
+impl<N, T> DirectAccess for Timestamp<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
@@ -439,7 +523,7 @@ where
     type Array = PrimitiveArray<T::Timestamp>;
 }
 
-impl<N, T> HasAccessor for Time<T>
+impl<N, T> DirectAccess for Time<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
@@ -448,7 +532,7 @@ where
     type Array = PrimitiveArray<T::Time>;
 }
 
-impl<N, T> HasAccessor for Duration<T>
+impl<N, T> DirectAccess for Duration<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
@@ -457,7 +541,7 @@ where
     type Array = PrimitiveArray<T::Duration>;
 }
 
-impl<N, T> HasAccessor for Interval<T>
+impl<N, T> DirectAccess for Interval<T>
 where
     N: ArrowNativeType,
     T: IntervalUnit,
@@ -468,76 +552,107 @@ where
 
 // -----------------------------------------------------------------------------
 
-pub struct ArrayIter<A, T> {
-    i: usize,
+pub struct UnitAccessor(usize);
+
+impl UnitAccessor {
+    fn new<A: Array>(array: A) -> UnitAccessor {
+        UnitAccessor(array.len())
+    }
+}
+
+impl InternalAccessor for UnitAccessor {
+    type Item = ();
+    fn len(&self) -> usize { self.0 }
+    unsafe fn get_unchecked(&self, _: usize) -> () { }
+}
+
+// -----------------------------------------------------------------------------
+
+pub struct DirectAccessor<A, T> {
     array: A,
     phantom: PhantomData<T>,
 }
 
-impl<A, T> ArrayIter<A, T> {
-    fn new(array: A) -> ArrayIter<A, T> {
-        ArrayIter { i: 0, array, phantom: PhantomData }
+impl<A, T> DirectAccessor<A, T> {
+    fn new(array: A) -> DirectAccessor<A, T> {
+        DirectAccessor { array, phantom: PhantomData }
     }
 }
 
-impl<A, T> Iterator for ArrayIter<A, T>
+impl<A, T> InternalAccessor for DirectAccessor<A, T>
 where
     A: Array,
+    T: DirectAccess<Array=A>,
     for<'a> &'a A: ArrayAccessor,
-    for<'a> T: From<<&'a A as ArrayAccessor>::Item>,
 {
     type Item = T;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.i < Array::len(&self.array) {
-            let x = ArrayAccessor::value(&&self.array, self.i);
-            self.i += 1;
-            Some(T::from(x))
-        } else {
-            None
-        }
+    fn len(&self) -> usize {
+        Array::len(&self.array)
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> T {
+        T::from(ArrayAccessor::value(&&self.array, i))
     }
 }
 
 // -----------------------------------------------------------------------------
 
-pub struct Mask<I> {
-    iter: I,
-    i: usize,
-    nulls: Option<NullBuffer>,
-}
+pub struct MaskedAccessor<A>(
+    std::result::Result<(A, Option<NullBuffer>), usize>,
+);
 
-impl<I> Mask<I> {
-    fn new(iter: I, nulls: Option<NullBuffer>) -> Mask<I> {
-        Mask { iter, i: 0, nulls }
+impl<A> MaskedAccessor<A> {
+    fn new(accessor: A, nulls: Option<NullBuffer>) -> Self {
+        MaskedAccessor(Ok((accessor, nulls)))
     }
-}
 
-impl<I: Iterator> Iterator for Mask<I> {
-    type Item = Option<I::Item>;
+    fn from_nulls(nulls: &NullArray) -> Self {
+        MaskedAccessor(Err(nulls.len()))
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.iter.next()?;
-
-        Some(match &self.nulls {
-            None => {
-                Some(item)
-            },
-            Some(buf) => {
-                let x = if buf.is_valid(self.i) {
-                    Some(item)
-                } else {
-                    None
-                };
-
-                self.i += 1;
-                x
-            },
+    fn union_nulls(self, nulls: Option<NullBuffer>) -> Self {
+        MaskedAccessor(match self.0 {
+            Err(count) => Err(count),
+            Ok((a, n)) => Ok((a, match (n, nulls) {
+                (Some(lhs), Some(rhs)) => Some(NullBuffer::new(lhs.inner() & rhs.inner())),
+                (None, b) => b,
+                (b, None) => b,
+            }))
         })
     }
 }
 
+impl<A: InternalAccessor> InternalAccessor for MaskedAccessor<A> {
+    type Item = Option<A::Item>;
+
+    fn len(&self) -> usize {
+        match &self.0 {
+            Ok((accesor, _)) => accesor.len(),
+            Err(count) => *count,
+        }
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
+        let (accesor, nulls) = self.0.as_ref().ok()?;
+
+        if null_at(nulls, i) {
+            return None;
+        }
+
+        Some(accesor.get_unchecked(i))
+    }
+}
+
 // -----------------------------------------------------------------------------
+
+fn null_at(nulls: &Option<NullBuffer>, i: usize) -> bool {
+    nulls.as_ref().map_or(false, |b| b.is_null(i))
+}
+
+fn clone_nulls<A: Array>(array: &A) -> Option<NullBuffer> {
+    array.nulls().map(|b| b.clone())
+}
 
 fn null_check<T, A: Array>(array: &A) -> Result<()> {
     if array.null_count() != 0 {
