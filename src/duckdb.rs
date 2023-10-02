@@ -13,10 +13,22 @@ use crate::arrow::{Array, FromArrow, Iter};
 pub use duckdb::types::ValueRef;
 pub use duckdb::types::Null;
 
-pub trait Spec {
-    type Params<'a>: Params;
-    type Results: Results;
+pub trait Spec: Sized {
+    type Params<'a>: Params = ();
+    type Results: Results = ();
     const SQL: &'static str;
+
+    fn execute(conn: &Connection, params: Self::Params<'_>) -> Result<usize> {
+        Statement::<Self>::new(conn)?.execute(params)
+    }
+
+    fn query(conn: &Connection, params: Self::Params<'_>) -> Result<Vec<Self::Results>> {
+        Query::<Self>::new(conn)?.query(params)?.try_collect()
+    }
+
+    fn query_row(conn: &Connection, params: Self::Params<'_>) -> Result<Self::Results> {
+        QueryRow::<Self>::new(conn)?.query_row(params)
+    }
 }
 
 pub struct HasTable;
@@ -61,7 +73,7 @@ impl<'conn, S: Spec> Query<'conn, S> {
         Ok(Query(Statement::new(conn)?))
     }
 
-    pub fn execute(&mut self, params: S::Params<'_>) -> Result<QueryResults<'_, 'conn, S::Results>> {
+    pub fn query(&mut self, params: S::Params<'_>) -> Result<QueryResults<'_, 'conn, S::Results>> {
         self.0.execute(params)?;
 
         Ok(QueryResults {
@@ -81,8 +93,8 @@ impl<'conn, S: Spec> QueryRow<'conn, S> {
         Ok(QueryRow(Query::new(conn)?))
     }
 
-    pub fn execute(&mut self, params: S::Params<'_>) -> Result<S::Results> {
-        match self.0.execute(params)?.next() {
+    pub fn query_row(&mut self, params: S::Params<'_>) -> Result<S::Results> {
+        match self.0.query(params)?.next() {
             Some(row) => row,
             None => Err(duckdb::Error::QueryReturnedNoRows).context(S::SQL),
         }

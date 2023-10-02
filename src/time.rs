@@ -5,7 +5,7 @@ use duckdb::types as dt;
 use crate::arrow::Primitive;
 use crate::duckdb::{ToSql, ValueRef};
 
-pub fn to_timestamp<Tz: TimeZone>(dt: DateTime<Tz>) -> Timestamp<Microsecond> {
+pub fn to_timestamp<Tz: TimeZone>(dt: DateTime<Tz>) -> Timestamp {
     Timestamp(dt.timestamp_micros())
 }
 
@@ -83,10 +83,21 @@ impl IntervalUnit for YearMonth { type Interval = IntervalYearMonthType; }
 impl IntervalUnit for DayTime { type Interval = IntervalDayTimeType; }
 impl IntervalUnit for MonthDayNano { type Interval = IntervalMonthDayNanoType; }
 
-pub struct Timestamp<T: TimeUnit>(pub <T::Timestamp as ArrowPrimitiveType>::Native);
-pub struct Time<T: TimeUnit>(pub <T::Time as ArrowPrimitiveType>::Native);
-pub struct Duration<T: TimeUnit>(pub <T::Duration as ArrowPrimitiveType>::Native);
-pub struct Interval<T: IntervalUnit>(pub <T::Interval as ArrowPrimitiveType>::Native);
+pub struct Timestamp<T: TimeUnit = Microsecond>(
+    pub <T::Timestamp as ArrowPrimitiveType>::Native,
+);
+
+pub struct Time<T: TimeUnit = Microsecond>(
+    pub <T::Time as ArrowPrimitiveType>::Native,
+);
+
+pub struct Duration<T: TimeUnit = Microsecond>(
+    pub <T::Duration as ArrowPrimitiveType>::Native,
+);
+
+pub struct Interval<T: IntervalUnit = DayTime>(
+    pub <T::Interval as ArrowPrimitiveType>::Native,
+);
 
 impl<N, T> From<N> for Timestamp<T>
 where

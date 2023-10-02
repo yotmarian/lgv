@@ -221,13 +221,13 @@ pub struct UnitArray(usize);
 
 impl Array for UnitArray {
     type Item<'a> = ();
-    type Arrow = Never;
+    type Arrow = !;
 
     fn len(&self) -> usize {
         self.0
     }
 
-    fn nullable_from_arrow(arrow: &Never) -> Result<Nullable<Self>> {
+    fn nullable_from_arrow(arrow: &!) -> Result<Nullable<Self>> {
         match *arrow { }
     }
 
@@ -393,7 +393,7 @@ pub enum StringArray {
 
 impl Array for StringArray {
     type Item<'a> = &'a str;
-    type Arrow = Never;
+    type Arrow = !;
 
     fn len(&self) -> usize {
         match self {
@@ -402,7 +402,7 @@ impl Array for StringArray {
         }
     }
 
-    fn nullable_from_arrow(arrow: &Never) -> Result<Nullable<Self>> {
+    fn nullable_from_arrow(arrow: &!) -> Result<Nullable<Self>> {
         match *arrow { }
     }
 
@@ -440,7 +440,7 @@ pub enum BinaryArray {
 
 impl Array for BinaryArray {
     type Item<'a> = &'a [u8];
-    type Arrow = Never;
+    type Arrow = !;
 
     fn len(&self) -> usize {
         match self {
@@ -450,7 +450,7 @@ impl Array for BinaryArray {
         }
     }
 
-    fn nullable_from_arrow(arrow: &Never) -> Result<Nullable<Self>> {
+    fn nullable_from_arrow(arrow: &!) -> Result<Nullable<Self>> {
         match *arrow { }
     }
 
@@ -667,9 +667,6 @@ impl_struct_columns! {
 }
 
 // -----------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub enum Never { }
 
 fn clone_nulls<A: aa::Array>(array: &A) -> Option<NullBuffer> {
     array.nulls().map(|b| b.clone())
