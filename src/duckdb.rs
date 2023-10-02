@@ -2,31 +2,27 @@ use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::{Context, Result};
-use duckdb::{ToSql, Connection};
-use duckdb::types::{Value, Null};
-use uuid::Uuid;
+use anyhow::{Context, Result, anyhow};
+use arrow::array as aa;
+use duckdb::Connection;
+use duckdb::types::ToSqlOutput;
 
-use crate::arrow::*;
+use crate::arrow::{Array, FromArrow, Iter};
 
-pub type DuckNull = Null;
-pub type DuckValue = Value;
-pub type DuckError = duckdb::Error;
-pub type DuckStatement<'conn> = duckdb::Statement<'conn>;
-pub type DuckResult<T> = duckdb::Result<T>;
+pub use duckdb::types::ValueRef;
+pub use duckdb::types::Null;
 
-pub trait Spec<'a> {
-    type Params: Params;
-    type Results: FromArrow;
+pub trait Spec {
+    type Params<'a>: Params;
+    type Results: Results;
     const SQL: &'static str;
 }
 
 pub struct HasTable;
 
-impl<'a> Spec<'a> for HasTable {
-    type Params = &'a str;
+impl Spec for HasTable {
+    type Params<'a> = &'a str;
     type Results = bool;
 
     const SQL: &'static str = "
@@ -39,17 +35,17 @@ impl<'a> Spec<'a> for HasTable {
 // -----------------------------------------------------------------------------
 
 pub struct Statement<'conn, S> {
-    duck: DuckStatement<'conn>,
+    duck: duckdb::Statement<'conn>,
     phantom: PhantomData<S>,
 }
 
-impl<'a, 'conn, S: Spec<'a>> Statement<'conn, S> {
+impl<'conn, S: Spec> Statement<'conn, S> {
     pub fn new(conn: &'conn Connection) -> Result<Statement<'conn, S>> {
         let duck = conn.prepare(S::SQL).context(S::SQL)?;
         Ok(Statement { duck, phantom: PhantomData })
     }
 
-    pub fn execute(&mut self, params: S::Params) -> Result<usize> {
+    pub fn execute(&mut self, params: S::Params<'_>) -> Result<usize> {
         params.bind(&mut self.duck)
             .and_then(|()| self.duck.raw_execute())
             .context(S::SQL)
@@ -60,12 +56,12 @@ impl<'a, 'conn, S: Spec<'a>> Statement<'conn, S> {
 
 pub struct Query<'conn, S>(Statement<'conn, S>);
 
-impl<'a, 'conn, S: Spec<'a>> Query<'conn, S> {
+impl<'conn, S: Spec> Query<'conn, S> {
     pub fn new(conn: &'conn Connection) -> Result<Query<'conn, S>> {
         Ok(Query(Statement::new(conn)?))
     }
 
-    pub fn execute(&mut self, params: S::Params) -> Result<QueryResults<'_, 'conn, S::Results>> {
+    pub fn execute(&mut self, params: S::Params<'_>) -> Result<QueryResults<'_, 'conn, S::Results>> {
         self.0.execute(params)?;
 
         Ok(QueryResults {
@@ -80,28 +76,28 @@ impl<'a, 'conn, S: Spec<'a>> Query<'conn, S> {
 
 pub struct QueryRow<'conn, S>(Query<'conn, S>);
 
-impl<'a, 'conn, S: Spec<'a>> QueryRow<'conn, S> {
+impl<'conn, S: Spec> QueryRow<'conn, S> {
     pub fn new(conn: &'conn Connection) -> Result<QueryRow<'conn, S>> {
         Ok(QueryRow(Query::new(conn)?))
     }
 
-    pub fn execute(&mut self, params: S::Params) -> Result<S::Results> {
+    pub fn execute(&mut self, params: S::Params<'_>) -> Result<S::Results> {
         match self.0.execute(params)?.next() {
             Some(row) => row,
-            None => Err(DuckError::QueryReturnedNoRows).context(S::SQL),
+            None => Err(duckdb::Error::QueryReturnedNoRows).context(S::SQL),
         }
     }
 }
 
 // -----------------------------------------------------------------------------
 
-pub struct QueryResults<'a, 'conn, R: FromArrow> {
-    statement: &'a mut DuckStatement<'conn>,
-    rows: Option<Iter<R>>,
+pub struct QueryResults<'a, 'conn, R: Results> {
+    statement: &'a mut duckdb::Statement<'conn>,
+    rows: Option<R::Iter>,
     sql: &'static str,
 }
 
-impl<'a, 'conn, R: FromArrow> Iterator for QueryResults<'a, 'conn, R> {
+impl<'a, 'conn, R: Results> Iterator for QueryResults<'a, 'conn, R> {
     type Item = Result<R>;
 
     fn next(&mut self) -> Option<Result<R>> {
@@ -114,8 +110,8 @@ impl<'a, 'conn, R: FromArrow> Iterator for QueryResults<'a, 'conn, R> {
                 }
             }
 
-            match Accessor::from_struct(self.statement.step()?) {
-                Ok(rows) => self.rows = Some(rows.into_iter()),
+            match R::batch_iter(self.statement.step()?) {
+                Ok(rows) => self.rows = Some(rows),
                 Err(e) => return Some(Err(e).context(self.sql)),
             }
         }
@@ -124,43 +120,162 @@ impl<'a, 'conn, R: FromArrow> Iterator for QueryResults<'a, 'conn, R> {
 
 // -----------------------------------------------------------------------------
 
-pub trait Params {
-    fn bind<'conn>(&self, s: &mut DuckStatement<'conn>) -> DuckResult<()>;
+pub trait Results {
+    type Iter: Iterator<Item=Self>;
+
+    fn batch_iter(array: aa::StructArray) -> Result<Self::Iter>;
 }
 
-impl<T: ToSql + Marker> Params for T {
-    fn bind<'conn>(&self, s: &mut DuckStatement<'conn>) -> DuckResult<()> {
-        s.raw_bind_parameter(1, &self.to_sql()?)
+impl<T: FromArrow> Results for T {
+    type Iter = Iter<T>;
+
+    fn batch_iter(array: aa::StructArray) -> Result<Self::Iter> {
+        if aa::Array::null_count(&array) == 0 {
+            Ok(Iter::new(T::Array::from_arrow_batch(&array.into())?))
+        } else {
+            Err(anyhow!("Result batch contains toplevel nulls"))
+        }
     }
 }
 
-trait Marker: ToSql { }
-impl<T: Marker> Marker for Option<T> { }
-impl<T: Marker + ?Sized> Marker for &'_ T { }
-impl<T: Marker + ?Sized> Marker for Box<T> { }
-impl<T: Marker + ?Sized> Marker for Rc<T> { }
-impl<T: Marker + ?Sized> Marker for Arc<T> { }
-impl<T: Marker + ToOwned + ?Sized> Marker for Cow<'_, T> { }
+// -----------------------------------------------------------------------------
 
-macro_rules! mark {
-    {$($x:ty)+} => { $(impl Marker for $x { })+ };
+pub trait ToSql {
+    fn to_sql(&self) -> ValueRef;
 }
 
-mark! {
-    Null bool String str Vec<u8> [u8] Value Duration Uuid
-    i8 i16 i32 i64 i128 isize u8 u16 u32 u64 usize f32 f64
+impl ToSql for Null {
+    fn to_sql(&self) -> ValueRef {
+        ValueRef::Null
+    }
+}
+
+impl ToSql for str {
+    fn to_sql(&self) -> ValueRef {
+        ValueRef::Text(self.as_bytes())
+    }
+}
+
+impl ToSql for [u8] {
+    fn to_sql(&self) -> ValueRef {
+        ValueRef::Blob(self)
+    }
+}
+
+impl ToSql for String {
+    fn to_sql(&self) -> ValueRef {
+        ValueRef::Text(self.as_bytes())
+    }
+}
+
+impl ToSql for Vec<u8> {
+    fn to_sql(&self) -> ValueRef {
+        ValueRef::Blob(&self)
+    }
+}
+
+impl<T: ToSql> ToSql for Option<T> {
+    fn to_sql(&self) -> ValueRef {
+        match self {
+            Some(x) => x.to_sql(),
+            None => ValueRef::Null,
+        }
+    }
+}
+
+impl<T: ToSql + ?Sized> ToSql for &T {
+    fn to_sql(&self) -> ValueRef {
+        T::to_sql(self)
+    }
+}
+
+impl<T: ToSql + ?Sized> ToSql for Box<T> {
+    fn to_sql(&self) -> ValueRef {
+        T::to_sql(self)
+    }
+}
+
+impl<T: ToSql + ?Sized> ToSql for Rc<T> {
+    fn to_sql(&self) -> ValueRef {
+        T::to_sql(self)
+    }
+}
+
+impl<T: ToSql + ?Sized> ToSql for Arc<T> {
+    fn to_sql(&self) -> ValueRef {
+        T::to_sql(self)
+    }
+}
+
+impl<T: ToSql + ToOwned + ?Sized> ToSql for Cow<'_, T> {
+    fn to_sql(&self) -> ValueRef {
+        T::to_sql(self)
+    }
+}
+
+macro_rules! impl_to_sql {
+    { $( $c:ident($p:ty), )+ } => { $(
+        impl ToSql for $p {
+            fn to_sql(&self) -> ValueRef {
+                ValueRef::$c(*self)
+            }
+        }
+    )+ };
+}
+
+impl_to_sql! {
+    Boolean(bool),
+    TinyInt(i8),
+    SmallInt(i16),
+    Int(i32),
+    BigInt(i64),
+    HugeInt(i128),
+    UTinyInt(u8),
+    USmallInt(u16),
+    UInt(u32),
+    UBigInt(u64),
+    Float(f32),
+    Double(f64),
+}
+
+// -----------------------------------------------------------------------------
+
+struct StraightToSql<'a>(ValueRef<'a>);
+
+impl duckdb::ToSql for StraightToSql<'_> {
+    fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(self.0))
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+pub trait Params {
+    fn bind(self, s: &mut duckdb::Statement) -> duckdb::Result<()>;
+}
+
+impl Params for () {
+    fn bind(self, _: &mut duckdb::Statement) -> duckdb::Result<()> {
+        Ok(())
+    }
+}
+
+impl<T: ToSql> Params for T {
+    fn bind(self, s: &mut duckdb::Statement) -> duckdb::Result<()> {
+        s.raw_bind_parameter(1, StraightToSql(self.to_sql()))
+    }
 }
 
 macro_rules! gen_tuple_params {
-    { $(($($x:ident)*))+ } => { $(
-        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments)]
+    { $( ($($x:ident),* $(,)?) )+ } => { $(
+        #[allow(non_snake_case)]
         impl<$($x: ToSql),*> Params for ($($x,)*) {            
-            fn bind(&self, s: &mut DuckStatement) -> DuckResult<()> {
+            fn bind(self, s: &mut duckdb::Statement) -> duckdb::Result<()> {
                 let ($($x,)*) = self;
-                let mut c = 1;
+                let mut c = 0;
                 $(
-                    s.raw_bind_parameter(c, &$x.to_sql()?)?;
                     c += 1;
+                    s.raw_bind_parameter(c, StraightToSql($x.to_sql()))?;
                 )*
                 Ok(())
             }
@@ -169,20 +284,19 @@ macro_rules! gen_tuple_params {
 }
 
 gen_tuple_params! {
-    ()
-    (A)
-    (A B)
-    (A B C)
-    (A B C D)
-    (A B C D E)
-    (A B C D E F)
-    (A B C D E F G)
-    (A B C D E F G H)
-    (A B C D E F G H I)
-    (A B C D E F G H I J)
-    (A B C D E F G H I J K)
-    (A B C D E F G H I J K L)
-    (A B C D E F G H I J K L M)
-    (A B C D E F G H I J K L M N)
-    (A B C D E F G H I J K L M N O)
+    (A,)
+    (A, B)
+    (A, B, C)
+    (A, B, C, D)
+    (A, B, C, D, E)
+    (A, B, C, D, E, F)
+    (A, B, C, D, E, F, G)
+    (A, B, C, D, E, F, G, H)
+    (A, B, C, D, E, F, G, H, I)
+    (A, B, C, D, E, F, G, H, I, J)
+    (A, B, C, D, E, F, G, H, I, J, K)
+    (A, B, C, D, E, F, G, H, I, J, K, L)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
 }

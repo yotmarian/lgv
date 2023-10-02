@@ -1,73 +1,104 @@
-use std::any;
-use std::collections::VecDeque;
-use std::marker::PhantomData;
+use std::any::type_name;
+use std::fmt::{Debug, Display};
+use std::path::PathBuf;
 
-use arrow::array::*;
-use arrow::buffer::NullBuffer;
+use arrow::array::{self as aa, ArrayRef};
+use arrow::buffer::{NullBuffer, BooleanBuffer, ScalarBuffer};
 use arrow::datatypes::*;
-use arrow::error::{Result, ArrowError};
+use arrow::record_batch::RecordBatch;
 use half::f16;
 
-pub struct Accessor<T: FromArrow>(T::Accessor);
+pub trait FromArrow {
+    type Array: Array;
 
-impl<T: FromArrow> Accessor<T> {
-    pub fn from_array(array: T::Array) -> Result<Self> {
-        Ok(Accessor(T::from_array(array)?))
-    }
+    fn from_arrow(value: <Self::Array as Array>::Item<'_>) -> Self;
+}
 
-    pub fn from_struct(array: StructArray) -> Result<Self> {
-        Ok(Accessor(T::from_struct(array)?))
-    }
+impl<T: DirectFromArrow> FromArrow for T {
+    type Array = T::Array;
 
-    pub fn from_any(array: ArrayRef) -> Result<Self> {
-        Ok(Accessor(T::from_any(array)?))
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn get(&self, i: usize) -> Option<T> {
-        if i < self.len() {
-            Some(unsafe { self.0.get_unchecked(i) })
-        } else {
-            None
-        }
-    }
-
-    pub unsafe fn get_unchecked(&self, i: usize) -> T {
-        self.0.get_unchecked(i)
+    fn from_arrow(value: <Self::Array as Array>::Item<'_>) -> Self {
+        T::from(value)
     }
 }
 
-impl<T: FromArrow> IntoIterator for Accessor<T> {
-    type Item = T;
-    type IntoIter = Iter<T>;
+impl<T: FromArrow> FromArrow for Option<T> {
+    type Array = Nullable<T::Array>;
 
-    fn into_iter(self) -> Iter<T> {
-        Iter::new(self.0)
+    fn from_arrow(value: <Self::Array as Array>::Item<'_>) -> Self {
+        value.map(T::from_arrow)
     }
+}
+
+macro_rules! impl_from_arrow {
+    { $( ($($x:ident), +$(,)?) )+ } => { $(
+        #[allow(non_snake_case)]
+        impl<$($x: FromArrow),+> FromArrow for ($($x,)+) {
+            type Array = StructArray<($($x::Array,)+)>;
+
+            fn from_arrow(value: <Self::Array as Array>::Item<'_>) -> Self {
+                let ($($x,)+) = value;
+                ($($x::from_arrow($x),)+)
+            }
+        }
+    )+ };
+}
+
+impl_from_arrow! {
+    (A,)
+    (A, B)
+    (A, B, C)
+    (A, B, C, D)
+    (A, B, C, D, E)
+    (A, B, C, D, E, F)
+    (A, B, C, D, E, F, G)
+    (A, B, C, D, E, F, G, H)
+    (A, B, C, D, E, F, G, H, I)
+    (A, B, C, D, E, F, G, H, I, J)
+    (A, B, C, D, E, F, G, H, I, J, K)
+    (A, B, C, D, E, F, G, H, I, J, K, L)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
+}
+
+// -----------------------------------------------------------------------------
+
+pub trait DirectFromArrow: for<'a> From<<Self::Array as Array>::Item<'a>> {
+    type Array: Array;
+}
+
+impl DirectFromArrow for () { type Array = UnitArray; }
+impl DirectFromArrow for bool { type Array = BooleanArray; }
+impl DirectFromArrow for Box<str> { type Array = StringArray; }
+impl DirectFromArrow for String { type Array = StringArray; }
+impl DirectFromArrow for PathBuf { type Array = StringArray; }
+impl DirectFromArrow for Box<[u8]> { type Array = BinaryArray; }
+impl DirectFromArrow for Vec<u8> { type Array = BinaryArray; }
+
+impl<T: Primitive> DirectFromArrow for T {
+    type Array = PrimitiveArray<T>;
 }
 
 // -----------------------------------------------------------------------------
 
 pub struct Iter<T: FromArrow> {
+    array: T::Array,
     i: usize,
-    accessor: T::Accessor,
 }
 
 impl<T: FromArrow> Iter<T> {
-    pub fn new(accessor: T::Accessor) -> Self {
-        Iter { i: 0, accessor }
+    pub fn new(array: T::Array) -> Iter<T> {
+        Iter { array, i: 0 }
     }
 }
 
 impl<T: FromArrow> Iterator for Iter<T> {
     type Item = T;
 
-    fn next(&mut self) -> Option<T> {
-        if self.i < self.accessor.len() {
-            let x = unsafe { self.accessor.get_unchecked(self.i) };
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i < self.array.len() {
+            let x = T::from_arrow(unsafe { self.array.get_unchecked(self.i) });
             self.i += 1;
             Some(x)
         } else {
@@ -76,633 +107,586 @@ impl<T: FromArrow> Iterator for Iter<T> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let size = self.len();
-        (size, Some(size))
+        let len = self.len();
+        (len, Some(len))
     }
 }
 
 impl<T: FromArrow> ExactSizeIterator for Iter<T> {
     fn len(&self) -> usize {
-        self.accessor.len() - self.i
+        self.array.len() - self.i
     }
 }
 
 // -----------------------------------------------------------------------------
 
-pub trait InternalAccessor {
-    type Item;
+pub trait Array: Clone + Send + Sync + 'static {
+    type Item<'a>;
+    type Arrow;
+
     fn len(&self) -> usize;
-    unsafe fn get_unchecked(&self, i: usize) -> Self::Item;
-}
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>>;
+    unsafe fn get_unchecked(&self, i: usize) -> Self::Item<'_>;
 
-pub trait FromArrow: Sized {
-    type Array: Array + Clone + 'static;
-    type Accessor: InternalAccessor<Item = Self>;
-    const STRUCT: bool;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Accessor>;
-
-    fn from_array(array: Self::Array) -> Result<Self::Accessor> {
-        null_check::<Self, _>(&array)?;
-        Self::from_nonnull_array(array)
+    fn from_arrow(arrow: &Self::Arrow) -> Result<Self> {
+        Self::nullable_from_arrow(arrow)?.null_check()
     }
 
-    fn from_nonnull_struct(array: StructArray) -> Result<Self::Accessor> {
-        let mut columns = n_columns::<Self>(1, array)?;
-        Self::from_any(columns.pop().unwrap())
+    fn nullable_from_arrow_any(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
+        match arrow.as_any().downcast_ref::<Self::Arrow>() {
+            Some(arrow) => Self::nullable_from_arrow(arrow),
+            None => Err(Error::IncompatibleArrowType {
+                expected: type_name::<Self::Arrow>(),
+                provided: arrow.data_type().clone(),
+            }),
+        }
     }
 
-    fn from_struct(array: StructArray) -> Result<Self::Accessor> {
-        null_check::<Self, _>(&array)?;
-        Self::from_nonnull_struct(array)
+    fn from_arrow_any(arrow: &dyn aa::Array) -> Result<Self> {
+        Self::nullable_from_arrow_any(arrow)?.null_check()
     }
 
-    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Accessor> {
-        Self::from_nonnull_array(downcast::<Self>(array)?)
+    fn nullable_from_arrow_batch(arrow: &RecordBatch) -> Result<Nullable<Self>> {
+        let [column] = n_columns(arrow.columns())?;
+        Self::nullable_from_arrow_any(column)
     }
 
-    fn from_any(array: ArrayRef) -> Result<Self::Accessor> {
-        null_check::<Self, _>(&array)?;
-        Self::from_nonnull_any(array)
-    }
-}
-
-impl FromArrow for () {
-    type Array = ArrayRef;
-    type Accessor = UnitAccessor;
-    const STRUCT: bool = false;
-
-    fn from_nonnull_array(array: ArrayRef) -> Result<UnitAccessor> {
-        Ok(UnitAccessor::new(array))
+    fn from_arrow_batch(arrow: &RecordBatch) -> Result<Self> {
+        Self::nullable_from_arrow_batch(arrow)?.null_check()
     }
 
-    fn from_nonnull_struct(array: StructArray) -> Result<UnitAccessor> {
-        Ok(UnitAccessor::new(array))
-    }
-
-    fn from_nonnull_any(array: ArrayRef) -> Result<UnitAccessor> {
-        Ok(UnitAccessor::new(array))
-    }
-}
-
-impl<T: DirectAccess> FromArrow for T
-where
-    for<'a> &'a T::Array: ArrayAccessor,
-{
-    type Array = T::Array;
-    type Accessor = DirectAccessor<T::Array, T>;
-    const STRUCT: bool = false;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Accessor> {
-        Ok(DirectAccessor::new(array))
-    }
-}
-
-impl<T: FromArrow> FromArrow for Option<T> {
-    type Array = T::Array;
-    type Accessor = MaskedAccessor<T::Accessor>;
-    const STRUCT: bool = T::STRUCT;
-
-    fn from_nonnull_array(array: Self::Array) -> Result<Self::Accessor> {
-        Ok(MaskedAccessor::new(T::from_nonnull_array(array)?, None))
-    }
-
-    fn from_array(array: Self::Array) -> Result<Self::Accessor> {
-        let nulls = clone_nulls(&array);
-        Ok(MaskedAccessor::new(T::from_nonnull_array(array)?, nulls))
-    }
-
-    fn from_nonnull_struct(array: StructArray) -> Result<Self::Accessor> {
-        if T::STRUCT || array.num_columns() > 1 {
-            Ok(MaskedAccessor::new(T::from_nonnull_struct(array)?, None))
+    fn get(&self, i: usize) -> Option<Self::Item<'_>> {
+        if i < self.len() {
+            None
         } else {
-            Self::from_any(n_columns::<Self>(1, array)?.pop().unwrap())
+            Some(unsafe { self.get_unchecked(i) })
         }
-    }
-
-    fn from_struct(array: StructArray) -> Result<Self::Accessor> {
-        let nulls = clone_nulls(&array);
-
-        if T::STRUCT || array.num_columns() > 1 {
-            Ok(MaskedAccessor::new(T::from_nonnull_struct(array)?, nulls))
-        } else {
-            let column = n_columns::<Self>(1, array)?.pop().unwrap();
-            let inner = Self::from_any(column)?;
-            Ok(inner.union_nulls(nulls))
-        }
-    }
-
-    fn from_nonnull_any(array: ArrayRef) -> Result<Self::Accessor> {
-        Self::from_any(array)
-    }
-
-    fn from_any(array: ArrayRef) -> Result<Self::Accessor> {
-        if let Some(nulls) = array.as_any().downcast_ref::<NullArray>() {
-            return Ok(MaskedAccessor::from_nulls(nulls));
-        }
-
-        let nulls = clone_nulls(&array);
-        Ok(MaskedAccessor::new(T::from_nonnull_any(array)?, nulls))
     }
 }
 
-macro_rules! impl_from_arrow {
-    { $($n:expr => $ta:ident ($($x:ident),+$(,)?))+ } => { $(
-        pub struct $ta<$($x: FromArrow),+>(usize, $($x::Accessor),+);
+// -----------------------------------------------------------------------------
 
-        impl<$($x: FromArrow),+> InternalAccessor for $ta<$($x),+> {
-            type Item = ($($x,)+);
+#[derive(Debug, Clone)]
+pub struct Nullable<A>(A, Option<NullBuffer>);
 
-            fn len(&self) -> usize {
-                self.0
+impl<A> Nullable<A> {
+    pub fn map<B, F: FnMut(A) -> B>(self, mut f: F) -> Nullable<B> {
+        Nullable(f(self.0), self.1)
+    }
+
+    pub fn no_nulls(self) -> Option<A> {
+        match self.1 {
+            Some(b) if b.null_count() != 0 => None,
+            _ => Some(self.0),
+        }
+    }
+
+    pub fn union_nulls(self, other: Option<NullBuffer>) -> Self {
+        Self(self.0, union_nulls(self.1, other))
+    }
+
+    fn null_check(self) -> Result<A> {
+        self.no_nulls().ok_or(Error::ContainsNulls)
+    }
+}
+
+impl<A: Array> Array for Nullable<A> {
+    type Item<'a> = Option<A::Item<'a>>;
+    type Arrow = A::Arrow;
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>> {
+        Ok(Nullable(A::nullable_from_arrow(arrow)?, None))
+    }
+
+    fn from_arrow(arrow: &Self::Arrow) -> Result<Self> {
+        A::nullable_from_arrow(arrow)
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> Self::Item<'_> {
+        match &self.1 {
+            Some(b) if b.is_null(i) => None,
+            _ => Some(self.0.get_unchecked(i)),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct UnitArray(usize);
+
+impl Array for UnitArray {
+    type Item<'a> = ();
+    type Arrow = Never;
+
+    fn len(&self) -> usize {
+        self.0
+    }
+
+    fn nullable_from_arrow(arrow: &Never) -> Result<Nullable<Self>> {
+        match *arrow { }
+    }
+
+    fn nullable_from_arrow_any(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
+        Ok(Nullable(Self(arrow.len()), None))
+    }
+
+    fn nullable_from_arrow_batch(arrow: &RecordBatch) -> Result<Nullable<Self>> {
+        Ok(Nullable(Self(arrow.num_rows()), None))
+    }
+
+    unsafe fn get_unchecked(&self, _: usize) -> () {
+        ()
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct BooleanArray(BooleanBuffer);
+
+impl Array for BooleanArray {
+    type Item<'a> = bool;
+    type Arrow = aa::BooleanArray;
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>> {
+        let nulls = clone_nulls(arrow);
+        Ok(Nullable(Self(arrow.values().clone()), nulls))
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> bool {
+        self.0.value(i)
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct PrimitiveArray<T: Primitive>(
+    ScalarBuffer<<T::Arrow as ArrowPrimitiveType>::Native>
+);
+
+impl<T: Primitive> Clone for PrimitiveArray<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: Primitive> Array for PrimitiveArray<T> {
+    type Item<'a> = T;
+    type Arrow = aa::PrimitiveArray<T::Arrow>;
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>> {
+        Ok(Nullable(Self(arrow.values().clone()), clone_nulls(arrow)))
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> T {
+        T::from(self.0[i])
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+pub struct GenericByteArray<T: ByteArrayType>(aa::GenericByteArray<T>);
+
+impl<T: ByteArrayType> Debug for GenericByteArray<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GenericByteArray").field(&self.0).finish()
+    }
+}
+
+impl<T: ByteArrayType> Clone for GenericByteArray<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: ByteArrayType> Array for GenericByteArray<T> {
+    type Item<'a> = &'a T::Native;
+    type Arrow = aa::GenericByteArray<T>;
+
+    fn len(&self) -> usize {
+        aa::Array::len(&self.0)
+    }
+
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>> {
+        let nulls = clone_nulls(arrow);
+        Ok(Nullable(Self(arrow.clone()), nulls))
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> &T::Native {
+        self.0.value(i)
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct SomeFixedSizeBinaryArray(aa::FixedSizeBinaryArray);
+
+impl Array for SomeFixedSizeBinaryArray {
+    type Item<'a> = &'a [u8];
+    type Arrow = aa::FixedSizeBinaryArray;
+
+    fn len(&self) -> usize {
+        aa::Array::len(&self.0)
+    }
+
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>> {
+        let nulls = clone_nulls(arrow);
+        Ok(Nullable(Self(arrow.clone()), nulls))
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> &[u8] {
+        self.0.value(i)
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct FixedSizeBinaryArray<const N: usize>(SomeFixedSizeBinaryArray);
+
+impl<const N: usize> Array for FixedSizeBinaryArray<N> {
+    type Item<'a> = &'a [u8; N];
+    type Arrow = aa::FixedSizeBinaryArray;
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>> {
+        if arrow.value_length().try_into() != Ok(N) {
+            return Err(Error::IncompatibleFixedSize {
+                expected: N,
+                provided: arrow.value_length(),
+            });
+        }
+
+        Ok(SomeFixedSizeBinaryArray::nullable_from_arrow(arrow)?.map(Self))
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> &[u8; N] {
+        self.0.get_unchecked(i).try_into().unwrap()
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum StringArray {
+    Normal(GenericByteArray<Utf8Type>),
+    Large(GenericByteArray<LargeUtf8Type>),
+}
+
+impl Array for StringArray {
+    type Item<'a> = &'a str;
+    type Arrow = Never;
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Normal(n) => n.len(),
+            Self::Large(l) => l.len(),
+        }
+    }
+
+    fn nullable_from_arrow(arrow: &Never) -> Result<Nullable<Self>> {
+        match *arrow { }
+    }
+
+    fn nullable_from_arrow_any(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
+        if let Ok(n) = GenericByteArray::<Utf8Type>::nullable_from_arrow_any(arrow) {
+            return Ok(n.map(Self::Normal))
+        }
+
+        if let Ok(n) = GenericByteArray::<LargeUtf8Type>::nullable_from_arrow_any(arrow) {
+            return Ok(n.map(Self::Large))
+        }
+
+        Err(Error::IncompatibleArrowType {
+            expected: "ByteArray of Utf8Type or LargeUtf8Type",
+            provided: arrow.data_type().clone(),
+        })
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> &str {
+        match self {
+            Self::Normal(n) => n.get_unchecked(i),
+            Self::Large(l) => l.get_unchecked(i),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum BinaryArray {
+    Normal(GenericByteArray<BinaryType>),
+    Large(GenericByteArray<LargeBinaryType>),
+    FixedSize(SomeFixedSizeBinaryArray),
+}
+
+impl Array for BinaryArray {
+    type Item<'a> = &'a [u8];
+    type Arrow = Never;
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Normal(n) => n.len(),
+            Self::Large(l) => l.len(),
+            Self::FixedSize(f) => f.len(),
+        }
+    }
+
+    fn nullable_from_arrow(arrow: &Never) -> Result<Nullable<Self>> {
+        match *arrow { }
+    }
+
+    fn nullable_from_arrow_any(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
+        if let Ok(n) = GenericByteArray::<BinaryType>::nullable_from_arrow_any(arrow) {
+            return Ok(n.map(Self::Normal))
+        }
+
+        if let Ok(n) = GenericByteArray::<LargeBinaryType>::nullable_from_arrow_any(arrow) {
+            return Ok(n.map(Self::Large))
+        }
+
+        if let Ok(n) = SomeFixedSizeBinaryArray::nullable_from_arrow_any(arrow) {
+            return Ok(n.map(Self::FixedSize))
+        }
+
+        Err(Error::IncompatibleArrowType {
+            expected: "FixedSizeBinaryArray or ByteArray of BinaryType or LargeBinaryType",
+            provided: arrow.data_type().clone(),
+        })
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> &[u8] {
+        match self {
+            Self::Normal(n) => n.get_unchecked(i),
+            Self::Large(l) => l.get_unchecked(i),
+            Self::FixedSize(f) => f.get_unchecked(i),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct StructArray<C: StructColumns> {
+    len: usize,
+    columns: C,
+}
+
+impl<C: StructColumns> Array for StructArray<C> {
+    type Item<'a> = C::Items<'a>;
+    type Arrow = aa::StructArray;
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn nullable_from_arrow(arrow: &Self::Arrow) -> Result<Nullable<Self>> {
+        Ok(Nullable(
+            StructArray {
+                len: aa::Array::len(arrow),
+                columns: C::columns_from_arrow(arrow.columns())?
+            },
+            clone_nulls(arrow),
+        ))
+    }
+
+    fn nullable_from_arrow_batch(arrow: &RecordBatch) -> Result<Nullable<Self>> {
+        Ok(Nullable(Self::from_arrow_batch(arrow)?, None))
+    }
+
+    fn from_arrow_batch(arrow: &RecordBatch) -> Result<Self> {
+        Ok(StructArray {
+            len: arrow.num_rows(),
+            columns: C::columns_from_arrow(arrow.columns())?,
+        })
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> C::Items<'_> {
+        self.columns.columns_get_unchecked(i)
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug)]
+pub enum Error {
+    ContainsNulls,
+
+    IncompatibleFixedSize {
+        expected: usize,
+        provided: i32,
+    },
+
+    IncompatibleArrowType {
+        expected: &'static str,
+        provided: DataType,
+    },
+
+    IncompatibleStructWidth {
+        expected: usize,
+        provided: usize,
+    },
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for Error { }
+
+// -----------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct ConversionError {
+    pub from: &'static str,
+    pub to: &'static str,
+    pub source: Option<Box<dyn std::error::Error + 'static>>,
+}
+
+impl Display for ConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for ConversionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref()
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+pub trait Primitive: From<<Self::Arrow as ArrowPrimitiveType>::Native> + 'static {
+    type Arrow: ArrowPrimitiveType;
+}
+
+macro_rules! impl_primitive {
+    { $($native:ty:$arrow:ty)+ } => {
+        $(impl Primitive for $native { type Arrow = $arrow; })+
+    };
+}
+
+impl_primitive! {
+    i8:Int8Type i16:Int16Type i32:Int32Type i64:Int64Type
+    u8:UInt8Type u16:UInt16Type u32:UInt32Type u64:UInt64Type
+    f16:Float16Type f32:Float32Type f64:Float64Type
+}
+
+// -----------------------------------------------------------------------------
+
+pub trait StructColumns: Clone + Send + Sync + 'static {
+    type Items<'a>;
+
+    fn columns_from_arrow(columns: &[ArrayRef]) -> Result<Self>;
+    unsafe fn columns_get_unchecked(&self, i: usize) -> Self::Items<'_>;
+}
+
+impl StructColumns for () {
+    type Items<'a> = ();
+
+    fn columns_from_arrow(_: &[ArrayRef]) -> Result<Self> {
+        Ok(())
+    }
+
+    unsafe fn columns_get_unchecked(&self, _: usize) -> () {
+        ()
+    }
+}
+
+impl<A: Array> StructColumns for A {
+    type Items<'a> = A::Item<'a>;
+
+    fn columns_from_arrow(columns: &[ArrayRef]) -> Result<Self> {
+        let [column] = n_columns(columns)?;
+        Ok(A::from_arrow_any(column)?)
+    }
+
+    unsafe fn columns_get_unchecked(&self, i: usize) -> A::Item<'_> {
+        A::get_unchecked(self, i)
+    }
+}
+
+macro_rules! impl_struct_columns {
+    { $(($($x:ident),+$(,)?))+ } => { $(
+        #[allow(non_snake_case)]
+        impl<$($x: Array),+> StructColumns for ($($x,)+) {
+            type Items<'a> = ($($x::Item<'a>,)+);
+
+            fn columns_from_arrow(columns: &[ArrayRef]) -> Result<Self> {
+                let [$($x),+] = n_columns(columns)?;
+                Ok(($($x::from_arrow_any($x)?,)+))
             }
 
-            #[allow(non_snake_case)]
-            unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
-                let $ta(_, $($x),+) = self;
+            unsafe fn columns_get_unchecked(&self, i: usize) -> Self::Items<'_> {
+                let ($($x,)+) = self;
                 ($($x.get_unchecked(i),)+)
-            }
-        }
-
-        impl<$($x: FromArrow),+> FromArrow for ($($x,)+) {
-            type Array = StructArray;
-            type Accessor = $ta<$($x),+>;
-            const STRUCT: bool = true;
-
-            fn from_nonnull_array(array: StructArray) -> Result<Self::Accessor> {
-                let len = array.len();
-                let mut columns = VecDeque::from(n_columns::<Self>($n, array)?);
-                Ok($ta(len, $(
-                    $x::from_any(columns.pop_front().unwrap())?
-                ),+))
             }
         }
     )+ };
 }
 
-impl_from_arrow! {
-    1 => TA1 (A,)
-    2 => TA2 (A, B)
-    3 => TA3 (A, B, C)
-    4 => TA4 (A, B, C, D)
-    5 => TA5 (A, B, C, D, E)
-    6 => TA6 (A, B, C, D, E, F)
-    7 => TA7 (A, B, C, D, E, F, G)
-    8 => TA8 (A, B, C, D, E, F, G, H)
-    9 => TA9 (A, B, C, D, E, F, G, H, I)
-    10 => TA10 (A, B, C, D, E, F, G, H, I, J)
-    11 => TA11 (A, B, C, D, E, F, G, H, I, J, K)
-    12 => TA12 (A, B, C, D, E, F, G, H, I, J, K, L)
-    13 => TA13 (A, B, C, D, E, F, G, H, I, J, K, L, M)
-    14 => TA14 (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
-    15 => TA15 (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
+impl_struct_columns! {
+    (A,)
+    (A, B)
+    (A, B, C)
+    (A, B, C, D)
+    (A, B, C, D, E)
+    (A, B, C, D, E, F)
+    (A, B, C, D, E, F, G)
+    (A, B, C, D, E, F, G, H)
+    (A, B, C, D, E, F, G, H, I)
+    (A, B, C, D, E, F, G, H, I, J)
+    (A, B, C, D, E, F, G, H, I, J, K)
+    (A, B, C, D, E, F, G, H, I, J, K, L)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N)
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)
 }
 
 // -----------------------------------------------------------------------------
 
-pub trait DirectAccess
-where
-    Self::Array: Array + Clone + 'static,
-    for<'a> &'a Self::Array: ArrayAccessor,
-    for<'a> Self: From<<&'a Self::Array as ArrayAccessor>::Item>,
-{
-    type Array;
-}
+#[derive(Debug, Clone)]
+pub enum Never { }
 
-impl DirectAccess for bool { type Array = BooleanArray; }
-
-macro_rules! impl_has_accessor {
-    { $($array:ident { $($native:ty:$arrow:ty)+ })+ } => {
-        $($(impl DirectAccess for $native { type Array = $array<$arrow>; })+)+
-    };
-}
-
-impl_has_accessor! {
-    PrimitiveArray {
-        i8:Int8Type  i16:Int16Type  i32:Int32Type  i64:Int64Type
-        u8:UInt8Type u16:UInt16Type u32:UInt32Type u64:UInt64Type
-
-        f16:Float16Type
-        f32:Float32Type
-        f64:Float64Type
-
-        Date<i32>:Date32Type
-        Date<i64>:Date64Type
-    }
-
-    GenericByteArray {
-        Box<str>:Utf8Type
-        String:Utf8Type
-
-        Box<[u8]>:BinaryType
-        Vec<u8>:BinaryType
-
-        Large<Box<str>>:LargeUtf8Type
-        Large<String>:LargeUtf8Type
-
-        Large<Box<[u8]>>:LargeBinaryType
-        Large<Vec<u8>>:LargeBinaryType
-    }
-}
-
-pub struct Date<T>(pub T);
-
-impl<T> From<T> for Date<T> {
-    fn from(value: T) -> Self {
-        Date(value)
-    }
-}
-
-pub struct Large<T>(pub T);
-
-impl<'a, T, S: ?Sized> From<&'a S> for Large<T>
-where
-    for<'b> T: From<&'b S>,
-{
-    fn from(value: &'a S) -> Self {
-        Large(T::from(value))
-    }
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct Primitive<T: ArrowPrimitiveType>(pub T::Native);
-
-impl<N, T> From<N> for Primitive<T>
-where
-    N: ArrowNativeType,
-    T: ArrowPrimitiveType<Native=N>,
-{
-    fn from(value: N) -> Self {
-        Primitive(value)
-    }
-}
-
-impl<T: ArrowPrimitiveType> DirectAccess for Primitive<T> {
-    type Array = PrimitiveArray<T>;
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct Bytes<T, U> {
-    pub value: U,
-    phantom: PhantomData<T>,
-}
-
-impl<T, U> Bytes<T, U> {
-    pub fn new(value: U) -> Bytes<T, U> {
-        Bytes { value, phantom: PhantomData }
-    }
-}
-
-impl<'a, T, U> From<&'a T::Native> for Bytes<T, U>
-where
-    T: ByteArrayType,
-    U: From<&'a T::Native>,
-{
-    fn from(value: &'a T::Native) -> Bytes<T, U> {
-        Bytes::new(U::from(value))
-    }
-}
-
-impl<'a, T, U> DirectAccess for Bytes<T, U>
-where
-    T: ByteArrayType,
-    for<'b> U: From<&'b T::Native>,
-{
-    type Array = GenericByteArray<T>;
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct FixedSizeBytes<T>(pub T);
-
-impl<'a, T> From<&'a [u8]> for FixedSizeBytes<T>
-where
-    for<'b> T: From<&'b [u8]>,
-{
-    fn from(value: &'a [u8]) -> FixedSizeBytes<T> {
-        FixedSizeBytes(T::from(value))
-    }
-}
-
-impl<'a, T> DirectAccess for FixedSizeBytes<T>
-where
-    for<'b> T: From<&'b [u8]>,
-{
-    type Array = FixedSizeBinaryArray;
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct List<T: FromArrow, O = i32> {
-    pub value: Result<Accessor<T>>,
-    phantom: PhantomData<O>,
-}
-
-impl<T: FromArrow, O> List<T, O> {
-    pub fn new(value: Result<Accessor<T>>) -> Self {
-        List { value, phantom: PhantomData }
-    }
-}
-
-impl<T: FromArrow, O> From<ArrayRef> for List<T, O> {
-    fn from(value: ArrayRef) -> Self {
-        Self::new(Accessor::from_any(value))
-    }
-}
-
-impl<T: FromArrow, O: OffsetSizeTrait> DirectAccess for List<T, O> {
-    type Array = GenericListArray<O>;
-}
-
-// -----------------------------------------------------------------------------
-
-pub trait TimeUnit {
-    type Timestamp: ArrowPrimitiveType;
-    type Time: ArrowPrimitiveType;
-    type Duration: ArrowPrimitiveType;
-}
-
-pub struct Second;
-pub struct Millisecond;
-pub struct Microsecond;
-pub struct Nanosecond;
-
-impl TimeUnit for Second {
-    type Timestamp = TimestampSecondType;
-    type Time = Time32SecondType;
-    type Duration = DurationSecondType;
-}
-
-impl TimeUnit for Millisecond {
-    type Timestamp = TimestampMillisecondType;
-    type Time = Time32MillisecondType;
-    type Duration = DurationMillisecondType;
-}
-
-impl TimeUnit for Microsecond {
-    type Timestamp = TimestampMicrosecondType;
-    type Time = Time64MicrosecondType;
-    type Duration = DurationMicrosecondType;
-}
-
-impl TimeUnit for Nanosecond {
-    type Timestamp = TimestampNanosecondType;
-    type Time = Time64NanosecondType;
-    type Duration = DurationNanosecondType;
-}
-
-pub trait IntervalUnit {
-    type Interval: ArrowPrimitiveType;
-}
-
-pub struct YearMonth;
-pub struct DayTime;
-pub struct MonthDayNano;
-
-impl IntervalUnit for YearMonth { type Interval = IntervalYearMonthType; }
-impl IntervalUnit for DayTime { type Interval = IntervalDayTimeType; }
-impl IntervalUnit for MonthDayNano { type Interval = IntervalMonthDayNanoType; }
-
-pub struct Timestamp<T: TimeUnit>(<T::Timestamp as ArrowPrimitiveType>::Native);
-pub struct Time<T: TimeUnit>(<T::Time as ArrowPrimitiveType>::Native);
-pub struct Duration<T: TimeUnit>(<T::Duration as ArrowPrimitiveType>::Native);
-pub struct Interval<T: IntervalUnit>(<T::Interval as ArrowPrimitiveType>::Native);
-
-impl<N, T> From<N> for Timestamp<T>
-where
-    N: ArrowNativeType,
-    T: TimeUnit,
-    T::Timestamp: ArrowPrimitiveType<Native=N>
-{
-    fn from(value: N) -> Self {
-        Timestamp(value)
-    }
-}
-
-impl<N, T> From<N> for Time<T>
-where
-    N: ArrowNativeType,
-    T: TimeUnit,
-    T::Time: ArrowPrimitiveType<Native=N>
-{
-    fn from(value: N) -> Self {
-        Time(value)
-    }
-}
-
-impl<N, T> From<N> for Duration<T>
-where
-    N: ArrowNativeType,
-    T: TimeUnit,
-    T::Duration: ArrowPrimitiveType<Native=N>
-{
-    fn from(value: N) -> Self {
-        Duration(value)
-    }
-}
-
-impl<N, T> From<N> for Interval<T>
-where
-    N: ArrowNativeType,
-    T: IntervalUnit,
-    T::Interval: ArrowPrimitiveType<Native=N>
-{
-    fn from(value: N) -> Self {
-        Interval(value)
-    }
-}
-
-impl<N, T> DirectAccess for Timestamp<T>
-where
-    N: ArrowNativeType,
-    T: TimeUnit,
-    T::Timestamp: ArrowPrimitiveType<Native=N>
-{
-    type Array = PrimitiveArray<T::Timestamp>;
-}
-
-impl<N, T> DirectAccess for Time<T>
-where
-    N: ArrowNativeType,
-    T: TimeUnit,
-    T::Time: ArrowPrimitiveType<Native=N>
-{
-    type Array = PrimitiveArray<T::Time>;
-}
-
-impl<N, T> DirectAccess for Duration<T>
-where
-    N: ArrowNativeType,
-    T: TimeUnit,
-    T::Duration: ArrowPrimitiveType<Native=N>
-{
-    type Array = PrimitiveArray<T::Duration>;
-}
-
-impl<N, T> DirectAccess for Interval<T>
-where
-    N: ArrowNativeType,
-    T: IntervalUnit,
-    T::Interval: ArrowPrimitiveType<Native=N>
-{
-    type Array = PrimitiveArray<T::Interval>;
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct UnitAccessor(usize);
-
-impl UnitAccessor {
-    fn new<A: Array>(array: A) -> UnitAccessor {
-        UnitAccessor(array.len())
-    }
-}
-
-impl InternalAccessor for UnitAccessor {
-    type Item = ();
-    fn len(&self) -> usize { self.0 }
-    unsafe fn get_unchecked(&self, _: usize) -> () { }
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct DirectAccessor<A, T> {
-    array: A,
-    phantom: PhantomData<T>,
-}
-
-impl<A, T> DirectAccessor<A, T> {
-    fn new(array: A) -> DirectAccessor<A, T> {
-        DirectAccessor { array, phantom: PhantomData }
-    }
-}
-
-impl<A, T> InternalAccessor for DirectAccessor<A, T>
-where
-    A: Array,
-    T: DirectAccess<Array=A>,
-    for<'a> &'a A: ArrayAccessor,
-{
-    type Item = T;
-
-    fn len(&self) -> usize {
-        Array::len(&self.array)
-    }
-
-    unsafe fn get_unchecked(&self, i: usize) -> T {
-        T::from(ArrayAccessor::value(&&self.array, i))
-    }
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct MaskedAccessor<A>(
-    std::result::Result<(A, Option<NullBuffer>), usize>,
-);
-
-impl<A> MaskedAccessor<A> {
-    fn new(accessor: A, nulls: Option<NullBuffer>) -> Self {
-        MaskedAccessor(Ok((accessor, nulls)))
-    }
-
-    fn from_nulls(nulls: &NullArray) -> Self {
-        MaskedAccessor(Err(nulls.len()))
-    }
-
-    fn union_nulls(self, nulls: Option<NullBuffer>) -> Self {
-        MaskedAccessor(match self.0 {
-            Err(count) => Err(count),
-            Ok((a, n)) => Ok((a, match (n, nulls) {
-                (Some(lhs), Some(rhs)) => Some(NullBuffer::new(lhs.inner() & rhs.inner())),
-                (None, b) => b,
-                (b, None) => b,
-            }))
-        })
-    }
-}
-
-impl<A: InternalAccessor> InternalAccessor for MaskedAccessor<A> {
-    type Item = Option<A::Item>;
-
-    fn len(&self) -> usize {
-        match &self.0 {
-            Ok((accesor, _)) => accesor.len(),
-            Err(count) => *count,
-        }
-    }
-
-    unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
-        let (accesor, nulls) = self.0.as_ref().ok()?;
-
-        if null_at(nulls, i) {
-            return None;
-        }
-
-        Some(accesor.get_unchecked(i))
-    }
-}
-
-// -----------------------------------------------------------------------------
-
-fn null_at(nulls: &Option<NullBuffer>, i: usize) -> bool {
-    nulls.as_ref().map_or(false, |b| b.is_null(i))
-}
-
-fn clone_nulls<A: Array>(array: &A) -> Option<NullBuffer> {
+fn clone_nulls<A: aa::Array>(array: &A) -> Option<NullBuffer> {
     array.nulls().map(|b| b.clone())
 }
 
-fn null_check<T, A: Array>(array: &A) -> Result<()> {
-    if array.null_count() != 0 {
-        Err(err_null::<T, A>())
-    } else {
-        Ok(())
+fn union_nulls(x: Option<NullBuffer>, y: Option<NullBuffer>) -> Option<NullBuffer> {
+    match (x, y) {
+        (Some(x), Some(y)) => Some(NullBuffer::new(x.inner() & y.inner())),
+        (x, None) => x,
+        (None, y) => y,
     }
 }
 
-fn n_columns<T>(n: usize, array: StructArray) -> Result<Vec<ArrayRef>> {
-    let (_, columns, _) = array.into_parts();
-
-    if columns.len() == n {
-        Ok(columns)
-    } else {
-        Err(err_columns::<T>(n, columns.len()))
-    }
-}
-
-fn downcast<T: FromArrow>(array: ArrayRef) -> Result<T::Array> {
-    match array.as_any().downcast_ref::<T::Array>() {
-        Some(r) => Ok(r.clone()),
-        None => Err(err_downcast::<T, T::Array>())
-    }
-}
-
-#[cold]
-fn err_null<T, A>() -> ArrowError {
-    ArrowError::CastError(format!(
-        "FromArrow({}): provided {} contains nulls",
-        any::type_name::<T>(),
-        any::type_name::<A>(),
-    ))
-}
-
-#[cold]
-fn err_columns<T>(required: usize, provided: usize) -> ArrowError {
-    ArrowError::CastError(format!(
-        "FromArrow({}): provided StructArray has {} columns (required {})",
-        any::type_name::<T>(),
-        provided,
-        required,
-    ))
-}
-
-#[cold]
-fn err_downcast<T, A>() -> ArrowError {
-    ArrowError::CastError(format!(
-        "FromArrow({}): provided ArrayRef is not a {}",
-        any::type_name::<T>(),
-        any::type_name::<A>(),
-    ))
+fn n_columns<const N: usize>(columns: &[ArrayRef]) -> Result<&[ArrayRef; N]> {
+    columns.try_into()
+        .map_err(|_| Error::IncompatibleStructWidth {
+            expected: 1,
+            provided: columns.len(),
+        })
 }
