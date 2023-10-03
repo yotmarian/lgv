@@ -23,11 +23,11 @@ pub trait Spec: Sized {
     }
 
     fn query(conn: &Connection, params: Self::Params<'_>) -> Result<Vec<Self::Results>> {
-        Query::<Self>::new(conn)?.query(params)?.try_collect()
+        Select::<Self>::new(conn)?.select(params)?.try_collect()
     }
 
     fn query_row(conn: &Connection, params: Self::Params<'_>) -> Result<Self::Results> {
-        QueryRow::<Self>::new(conn)?.query_row(params)
+        SelectRow::<Self>::new(conn)?.select_row(params)
     }
 }
 
@@ -66,14 +66,46 @@ impl<'conn, S: Spec> Statement<'conn, S> {
 
 // -----------------------------------------------------------------------------
 
-pub struct Query<'conn, S>(Statement<'conn, S>);
+pub struct Insert<'conn, S> {
+    statement: Statement<'conn, S>,
+    conn: &'conn Connection,
+}
 
-impl<'conn, S: Spec> Query<'conn, S> {
-    pub fn new(conn: &'conn Connection) -> Result<Query<'conn, S>> {
-        Ok(Query(Statement::new(conn)?))
+impl<'conn, S: Spec> Insert<'conn, S> {
+    pub fn new(conn: &'conn Connection) -> Result<Insert<'conn, S>> {
+        Ok(Insert { conn, statement: Statement::new(conn)? })
     }
 
-    pub fn query(&mut self, params: S::Params<'_>) -> Result<QueryResults<'_, 'conn, S::Results>> {
+    pub fn insert(&mut self, params: S::Params<'_>) -> Result<usize> {
+        self.statement.execute(params)
+    }
+
+    pub fn insert_many<'a>(
+        &mut self,
+        rows: impl IntoIterator<Item=S::Params<'a>>,
+    ) -> Result<usize> {
+        let mut affected_rows = 0;
+        let tx = self.conn.unchecked_transaction()?;
+
+        for params in rows {
+            affected_rows += self.statement.execute(params)?;
+        }
+
+        tx.commit()?;
+        Ok(affected_rows)
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+pub struct Select<'conn, S>(Statement<'conn, S>);
+
+impl<'conn, S: Spec> Select<'conn, S> {
+    pub fn new(conn: &'conn Connection) -> Result<Select<'conn, S>> {
+        Ok(Select(Statement::new(conn)?))
+    }
+
+    pub fn select(&mut self, params: S::Params<'_>) -> Result<QueryResults<'_, 'conn, S::Results>> {
         self.0.execute(params)?;
 
         Ok(QueryResults {
@@ -86,15 +118,15 @@ impl<'conn, S: Spec> Query<'conn, S> {
 
 // -----------------------------------------------------------------------------
 
-pub struct QueryRow<'conn, S>(Query<'conn, S>);
+pub struct SelectRow<'conn, S>(Select<'conn, S>);
 
-impl<'conn, S: Spec> QueryRow<'conn, S> {
-    pub fn new(conn: &'conn Connection) -> Result<QueryRow<'conn, S>> {
-        Ok(QueryRow(Query::new(conn)?))
+impl<'conn, S: Spec> SelectRow<'conn, S> {
+    pub fn new(conn: &'conn Connection) -> Result<SelectRow<'conn, S>> {
+        Ok(SelectRow(Select::new(conn)?))
     }
 
-    pub fn query_row(&mut self, params: S::Params<'_>) -> Result<S::Results> {
-        match self.0.query(params)?.next() {
+    pub fn select_row(&mut self, params: S::Params<'_>) -> Result<S::Results> {
+        match self.0.select(params)?.next() {
             Some(row) => row,
             None => Err(duckdb::Error::QueryReturnedNoRows).context(S::SQL),
         }

@@ -5,8 +5,22 @@ use duckdb::types as dt;
 use crate::arrow::Primitive;
 use crate::duckdb::{ToSql, ValueRef};
 
-pub fn to_timestamp<Tz: TimeZone>(dt: DateTime<Tz>) -> Timestamp {
-    Timestamp(dt.timestamp_micros())
+pub const MICROSECONDS_IN_SECOND: i64 = 1_000_000;
+
+pub trait IntoTimestamp {
+    fn into_timestamp(self) -> Timestamp;
+}
+
+impl<Tz: TimeZone> IntoTimestamp for DateTime<Tz> {
+    fn into_timestamp(self) -> Timestamp {
+        Timestamp(self.timestamp_micros())
+    }
+}
+
+impl IntoTimestamp for f64 {
+    fn into_timestamp(self) -> Timestamp {
+        Timestamp((self * MICROSECONDS_IN_SECOND as f64) as i64)
+    }
 }
 
 // -----------------------------------------------------------------------------
