@@ -22,11 +22,11 @@ pub trait Spec: Sized {
         Statement::<Self>::new(conn)?.execute(params)
     }
 
-    fn query(conn: &Connection, params: Self::Params<'_>) -> Result<Vec<Self::Results>> {
+    fn select(conn: &Connection, params: Self::Params<'_>) -> Result<Vec<Self::Results>> {
         Select::<Self>::new(conn)?.select(params)?.try_collect()
     }
 
-    fn query_row(conn: &Connection, params: Self::Params<'_>) -> Result<Self::Results> {
+    fn select_row(conn: &Connection, params: Self::Params<'_>) -> Result<Self::Results> {
         SelectRow::<Self>::new(conn)?.select_row(params)
     }
 }
@@ -58,9 +58,9 @@ impl<'conn, S: Spec> Statement<'conn, S> {
     }
 
     pub fn execute(&mut self, params: S::Params<'_>) -> Result<usize> {
-        params.bind(&mut self.duck)
-            .and_then(|()| self.duck.raw_execute())
-            .context(S::SQL)
+        let mut binder = Binder::new(&mut self.duck, S::SQL);
+        params.bind_to(&mut binder)?;
+        self.duck.raw_execute().context(S::SQL)
     }
 }
 
@@ -294,19 +294,46 @@ impl duckdb::ToSql for StraightToSql<'_> {
 
 // -----------------------------------------------------------------------------
 
+pub struct Binder<'a, 'conn> {
+    statement: &'a mut duckdb::Statement<'conn>,
+    column: usize,
+    sql: &'a str,
+}
+
+impl<'a, 'conn> Binder<'a, 'conn> {
+    fn new(statement: &'a mut duckdb::Statement<'conn>, sql: &'a str) -> Self {
+        Binder { statement, column: 1, sql }
+    }
+
+    pub fn bind<T: ToSql>(&mut self, value: T) -> Result<()> {
+        self.bind_value_ref(value.to_sql())
+    }
+
+    pub fn bind_value_ref(&mut self, value_ref: ValueRef) -> Result<()> {
+        self.statement.raw_bind_parameter(self.column, StraightToSql(value_ref))
+            .with_context(|| format!("Column {}", self.column))
+            .with_context(|| String::from(self.sql))?;
+
+        self.column += 1;
+        Ok(())
+    }
+}
+
+// -----------------------------------------------------------------------------
+
 pub trait Params {
-    fn bind(self, s: &mut duckdb::Statement) -> duckdb::Result<()>;
+    fn bind_to(self, binder: &mut Binder) -> Result<()>;
 }
 
 impl Params for () {
-    fn bind(self, _: &mut duckdb::Statement) -> duckdb::Result<()> {
+    fn bind_to(self, _: &mut Binder) -> Result<()> {
         Ok(())
     }
 }
 
 impl<T: ToSql> Params for T {
-    fn bind(self, s: &mut duckdb::Statement) -> duckdb::Result<()> {
-        s.raw_bind_parameter(1, StraightToSql(self.to_sql()))
+    fn bind_to(self, binder: &mut Binder) -> Result<()> {
+        binder.bind(self)
     }
 }
 
@@ -314,13 +341,9 @@ macro_rules! gen_tuple_params {
     { $( ($($x:ident),* $(,)?) )+ } => { $(
         #[allow(non_snake_case)]
         impl<$($x: ToSql),*> Params for ($($x,)*) {            
-            fn bind(self, s: &mut duckdb::Statement) -> duckdb::Result<()> {
+            fn bind_to(self, binder: &mut Binder) -> Result<()> {
                 let ($($x,)*) = self;
-                let mut c = 0;
-                $(
-                    c += 1;
-                    s.raw_bind_parameter(c, StraightToSql($x.to_sql()))?;
-                )*
+                $(binder.bind($x)?;)*
                 Ok(())
             }
         }
