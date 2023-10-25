@@ -22,12 +22,16 @@ pub trait Spec: Sized {
         Statement::<Self>::new(conn)?.execute(params)
     }
 
-    fn select(conn: &Connection, params: Self::Params<'_>) -> Result<Vec<Self::Results>> {
-        Select::<Self>::new(conn)?.select(params)?.try_collect()
+    fn select_row(conn: &Connection, params: Self::Params<'_>) -> Result<Self::Results> {
+        Select::<Self>::new(conn)?.select_row(params)
     }
 
-    fn select_row(conn: &Connection, params: Self::Params<'_>) -> Result<Self::Results> {
-        SelectRow::<Self>::new(conn)?.select_row(params)
+    fn select_vec(conn: &Connection, params: Self::Params<'_>) -> Result<Vec<Self::Results>> {
+        Select::<Self>::new(conn)?.select_vec(params)
+    }
+
+    fn select_n<const N: usize>(conn: &Connection, params: Self::Params<'_>) -> Result<[Self::Results; N]> {
+        Select::<Self>::new(conn)?.select_n(params)
     }
 }
 
@@ -114,22 +118,27 @@ impl<'conn, S: Spec> Select<'conn, S> {
             sql: S::SQL,
         })
     }
-}
-
-// -----------------------------------------------------------------------------
-
-pub struct SelectRow<'conn, S>(Select<'conn, S>);
-
-impl<'conn, S: Spec> SelectRow<'conn, S> {
-    pub fn new(conn: &'conn Connection) -> Result<SelectRow<'conn, S>> {
-        Ok(SelectRow(Select::new(conn)?))
-    }
 
     pub fn select_row(&mut self, params: S::Params<'_>) -> Result<S::Results> {
-        match self.0.select(params)?.next() {
+        match self.select(params)?.next() {
             Some(row) => row,
             None => Err(duckdb::Error::QueryReturnedNoRows).context(S::SQL),
         }
+    }
+
+    pub fn select_vec(&mut self, params: S::Params<'_>) -> Result<Vec<S::Results>> {
+        self.select(params)?.try_collect()
+    }
+
+    pub fn select_n<const N: usize>(&mut self, params: S::Params<'_>) -> Result<[S::Results; N]> {
+        let mut iter = self.select(params)?;
+
+        std::array::try_from_fn(|i| {
+            iter.next().ok_or_else(
+                || anyhow!("Not enough rows (expected: {N}, provided: {i})")
+                    .context(S::SQL)
+            ).flatten()
+        })
     }
 }
 
