@@ -5,6 +5,7 @@ use std::mem::size_of;
 use std::path::Path;
 
 use anyhow::{Result, Context};
+use log::info;
 use zerocopy::{AsBytes, FromBytes};
 
 
@@ -12,6 +13,8 @@ pub struct Writer<T>(BufWriter<File>, PhantomData<fn(T)>);
 
 impl<T: AsBytes> Writer<T> {
     pub fn open(path: &Path) -> Result<Self> {
+        info!("Opening flatstore {path:?} for writing");
+
         Ok(Writer(
             BufWriter::new(
                 OpenOptions::new()
@@ -34,12 +37,18 @@ pub struct Reader<T>(File, PhantomData<fn() -> T>);
 
 impl<T: AsBytes + FromBytes> Reader<T> {
     pub fn open(path: &Path) -> Result<Self> {
-        Ok(Reader(
+        info!("Opening flatstore {path:?} for reading");
+
+        let mut reader = Reader(
             OpenOptions::new()
                 .read(true)
                 .open(path)?,
             PhantomData,
-        ))
+        );
+
+        let size = reader.size()?;
+        info!("Found {size} elements");
+        Ok(reader)
     }
 
     pub fn size(&mut self) -> Result<u64> {
