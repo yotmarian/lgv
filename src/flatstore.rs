@@ -1,10 +1,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
-use std::mem::size_of;
+use std::mem::{size_of, align_of};
+use std::ops::Deref;
 use std::path::Path;
 
-use anyhow::{Result, Context};
+use anyhow::{Result, Context, anyhow};
 use log::info;
 use zerocopy::{AsBytes, FromBytes};
 
@@ -20,7 +21,8 @@ impl<T: AsBytes> Writer<T> {
                 OpenOptions::new()
                     .append(true)
                     .create(true)
-                    .open(path)?
+                    .open(path)
+                    .context("flatstore open writer")?
             ),
             PhantomData,
         ))
@@ -42,7 +44,8 @@ impl<T: AsBytes + FromBytes> Reader<T> {
         let mut reader = Reader(
             OpenOptions::new()
                 .read(true)
-                .open(path)?,
+                .open(path)
+                .context("flatstore open reader")?,
             PhantomData,
         );
 
@@ -64,5 +67,41 @@ impl<T: AsBytes + FromBytes> Reader<T> {
 
         self.0.read_exact(buf.as_bytes_mut())
             .context("flatstore read")
+    }
+}
+
+
+pub struct Mmap<T>(memmap::Mmap, PhantomData<fn() -> T>);
+
+impl<T> Mmap<T> {
+    pub fn open(path: &Path) -> Result<Self> {
+        info!("Opening flatstore {path:?} as a memory map");
+
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .context("flatstore open reader")?;
+
+        let mmap = Mmap(
+            unsafe { memmap::Mmap::map(&file) }.context("flatstore map")?,
+            PhantomData,
+        );
+
+        if mmap.0.len() % size_of::<T>() != 0 {
+            Err(anyhow!("flatstore: file size is not a multiple of record len"))
+        } else if !mmap.0.as_ptr().is_aligned_to(align_of::<T>()) {
+            Err(anyhow!("flatstore: mmap is not properly aligned"))
+        } else {
+            Ok(mmap)
+        }
+    }
+}
+
+impl<T: FromBytes> Deref for Mmap<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        FromBytes::slice_from(&self.0)
+            .expect("flatstore: invariants broken since opened")
     }
 }
