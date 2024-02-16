@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1.0.79"
 arrow = "49.0.0"
 chrono = "0.4.34"
-duckdb = { version = "0.9.2" }
+duckdb = "0.9.2"
 half = "2.3.1"
 log = "0.4.20"
 memmap = "0.7.0"

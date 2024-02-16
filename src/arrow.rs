@@ -1,13 +1,17 @@
-use std::any::type_name;
-use std::collections::HashSet;
-use std::fmt::{Debug, Display};
-use std::ops::Range;
-use std::path::PathBuf;
+use std::{
+    any::type_name,
+    collections::HashSet,
+    fmt::{Debug, Display},
+    ops::Range,
+    path::PathBuf,
+};
 
-use arrow::array::{self as aa, ArrayRef, OffsetSizeTrait};
-use arrow::buffer::{NullBuffer, BooleanBuffer, ScalarBuffer, OffsetBuffer};
-use arrow::datatypes::*;
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{self as aa, ArrayRef, OffsetSizeTrait},
+    buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer},
+    datatypes::*,
+    record_batch::RecordBatch,
+};
 use half::f16;
 
 pub trait FromArrow {
@@ -63,17 +67,39 @@ impl_from_arrow_tuple! {
 
 // -----------------------------------------------------------------------------
 
-pub trait DirectFromArrow: for<'a> From<<Self::Array as Array>::Item<'a>> {
+pub trait DirectFromArrow:
+    for<'a> From<<Self::Array as Array>::Item<'a>>
+{
     type Array: Array;
 }
 
-impl DirectFromArrow for () { type Array = UnitArray; }
-impl DirectFromArrow for bool { type Array = BooleanArray; }
-impl DirectFromArrow for Box<str> { type Array = StringArray; }
-impl DirectFromArrow for String { type Array = StringArray; }
-impl DirectFromArrow for PathBuf { type Array = StringArray; }
-impl DirectFromArrow for Box<[u8]> { type Array = BinaryArray; }
-impl DirectFromArrow for Vec<u8> { type Array = BinaryArray; }
+impl DirectFromArrow for () {
+    type Array = UnitArray;
+}
+
+impl DirectFromArrow for bool {
+    type Array = BooleanArray;
+}
+
+impl DirectFromArrow for Box<str> {
+    type Array = StringArray;
+}
+
+impl DirectFromArrow for String {
+    type Array = StringArray;
+}
+
+impl DirectFromArrow for PathBuf {
+    type Array = StringArray;
+}
+
+impl DirectFromArrow for Box<[u8]> {
+    type Array = BinaryArray;
+}
+
+impl DirectFromArrow for Vec<u8> {
+    type Array = BinaryArray;
+}
 
 impl<T: Primitive> DirectFromArrow for T {
     type Array = PrimitiveArray<T>;
@@ -81,7 +107,9 @@ impl<T: Primitive> DirectFromArrow for T {
 
 // -----------------------------------------------------------------------------
 
-pub trait Primitive: From<<Self::Arrow as ArrowPrimitiveType>::Native> + 'static {
+pub trait Primitive:
+    From<<Self::Arrow as ArrowPrimitiveType>::Native>+'static
+{
     type Arrow: ArrowPrimitiveType;
 }
 
@@ -137,7 +165,7 @@ impl<T: FromArrow> ExactSizeIterator for Iter<T> {
 
 // -----------------------------------------------------------------------------
 
-pub trait Array: Clone + Send + Sync + 'static {
+pub trait Array: Clone+Send+Sync+'static {
     type Item<'a>;
 
     fn len(&self) -> usize;
@@ -150,7 +178,9 @@ pub trait Array: Clone + Send + Sync + 'static {
         Self::nullable_from_arrow(arrow)?.null_check()
     }
 
-    fn nullable_from_arrow_batch(arrow: &RecordBatch) -> Result<Nullable<Self>> {
+    fn nullable_from_arrow_batch(
+        arrow: &RecordBatch,
+    ) -> Result<Nullable<Self>> {
         let [column] = n_columns(arrow.columns())?;
         Self::nullable_from_arrow(column)
     }
@@ -244,7 +274,9 @@ impl Array for UnitArray {
         Ok(Nullable(Self(arrow.len()), None))
     }
 
-    fn nullable_from_arrow_batch(arrow: &RecordBatch) -> Result<Nullable<Self>> {
+    fn nullable_from_arrow_batch(
+        arrow: &RecordBatch,
+    ) -> Result<Nullable<Self>> {
         Ok(Nullable(Self(arrow.num_rows()), None))
     }
 
@@ -283,7 +315,7 @@ impl Array for BooleanArray {
 // -----------------------------------------------------------------------------
 
 pub struct PrimitiveArray<T: Primitive>(
-    ScalarBuffer<<T::Arrow as ArrowPrimitiveType>::Native>
+    ScalarBuffer<<T::Arrow as ArrowPrimitiveType>::Native>,
 );
 
 impl<T: Primitive> Debug for PrimitiveArray<T> {
@@ -403,10 +435,10 @@ impl<const N: usize> Array for FixedSizeBinaryArray<N> {
     fn nullable_from_arrow(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
         let some = SomeFixedSizeBinaryArray::nullable_from_arrow(arrow)?;
 
-        if some.0.0.value_length().try_into() != Ok(N) {
+        if some.0 .0.value_length().try_into() != Ok(N) {
             return Err(Error::IncompatibleFixedSize {
                 expected: N,
-                provided: some.0.0.value_length(),
+                provided: some.0 .0.value_length(),
             });
         }
 
@@ -427,18 +459,19 @@ pub struct GenericListArray<O: OffsetSizeTrait, A: Array> {
 
 impl<O: OffsetSizeTrait, A: Array> GenericListArray<O, A> {
     fn item_range(&self, i: usize) -> Range<usize> {
-        let end = self.offsets[i+1].as_usize();
+        let end = self.offsets[i + 1].as_usize();
         let start = self.offsets[i].as_usize();
-        start..end
+        start .. end
     }
 
-    fn sizes(&self) -> impl Iterator<Item=usize> + '_ {
-        self.offsets.iter()
-            .map_windows(|&[c, n]| { n.as_usize() - c.as_usize() })
+    fn sizes(&self) -> impl Iterator<Item=usize>+'_ {
+        self.offsets
+            .iter()
+            .map_windows(|&[c, n]| n.as_usize() - c.as_usize())
     }
 
     fn check_fixed_size(&self, size: usize) -> Result<()> {
-        if self.sizes().all(|s| { s == size }) {
+        if self.sizes().all(|s| s == size) {
             Ok(())
         } else {
             Err(Error::SizeNotFixed {
@@ -449,7 +482,7 @@ impl<O: OffsetSizeTrait, A: Array> GenericListArray<O, A> {
     }
 }
 
-impl<O: OffsetSizeTrait, A: Array + Debug> Debug for GenericListArray<O, A> {
+impl<O: OffsetSizeTrait, A: Array+Debug> Debug for GenericListArray<O, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GenericListArray")
             .field("inner", &self.inner)
@@ -460,7 +493,10 @@ impl<O: OffsetSizeTrait, A: Array + Debug> Debug for GenericListArray<O, A> {
 
 impl<O: OffsetSizeTrait, A: Array> Clone for GenericListArray<O, A> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), offsets: self.offsets.clone() }
+        Self {
+            inner: self.inner.clone(),
+            offsets: self.offsets.clone(),
+        }
     }
 }
 
@@ -670,7 +706,7 @@ macro_rules! gen_one_ofs {
                 Err(Error::Multiple {
                     context: type_name::<Self>(),
                     errors: vec![$x, $($xs),+],
-                })                
+                })
             }
 
             fn index(&self, i: usize) -> Self::Item<'_> {
@@ -690,10 +726,8 @@ gen_one_ofs! {
 
 // -----------------------------------------------------------------------------
 
-pub type StringArray = OneOf2<
-    GenericByteArray<Utf8Type>,
-    GenericByteArray<LargeUtf8Type>,
->;
+pub type StringArray =
+    OneOf2<GenericByteArray<Utf8Type>, GenericByteArray<LargeUtf8Type>>;
 
 pub type BinaryArray = OneOf3<
     GenericByteArray<BinaryType>,
@@ -757,16 +791,22 @@ where
 // -----------------------------------------------------------------------------
 
 pub struct LenientFixedSizePrimitiveListArray<T: Primitive, const N: usize>(
-    PrimitiveListArray<T>
+    PrimitiveListArray<T>,
 );
 
-impl<T: Primitive, const N: usize> Debug for LenientFixedSizePrimitiveListArray<T, N> {
+impl<T: Primitive, const N: usize> Debug
+    for LenientFixedSizePrimitiveListArray<T, N>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("LenientFixedSizePrimitiveListArray").field(&self.0).finish()
+        f.debug_tuple("LenientFixedSizePrimitiveListArray")
+            .field(&self.0)
+            .finish()
     }
 }
 
-impl<T: Primitive, const N: usize> Clone for LenientFixedSizePrimitiveListArray<T, N> {
+impl<T: Primitive, const N: usize> Clone
+    for LenientFixedSizePrimitiveListArray<T, N>
+{
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
@@ -791,7 +831,7 @@ where
     fn nullable_from_arrow(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
         let inner = PrimitiveListArray::<T>::nullable_from_arrow(arrow)?;
 
-        match &inner.0.0 {
+        match &inner.0 .0 {
             OneOf3::A(x) => x.check_fixed_size(N),
             OneOf3::B(x) => x.check_fixed_size(N),
             OneOf3::C(x) => x.check_fixed_size(N),
@@ -807,7 +847,7 @@ where
 
 // -----------------------------------------------------------------------------
 
-type Result<T, E = Error> = std::result::Result<T, E>;
+type Result<T, E=Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -845,7 +885,7 @@ impl Display for Error {
     }
 }
 
-impl std::error::Error for Error { }
+impl std::error::Error for Error {}
 
 // -----------------------------------------------------------------------------
 
@@ -853,7 +893,10 @@ fn clone_nulls<A: aa::Array>(array: &A) -> Option<NullBuffer> {
     array.nulls().map(|b| b.clone())
 }
 
-fn union_nulls(x: Option<NullBuffer>, y: Option<NullBuffer>) -> Option<NullBuffer> {
+fn union_nulls(
+    x: Option<NullBuffer>,
+    y: Option<NullBuffer>,
+) -> Option<NullBuffer> {
     match (x, y) {
         (Some(x), Some(y)) => Some(NullBuffer::new(x.inner() & y.inner())),
         (x, None) => x,
@@ -872,7 +915,8 @@ fn downcast<A: 'static>(arrow: &dyn aa::Array) -> Result<&A> {
 }
 
 fn n_columns<const N: usize>(columns: &[ArrayRef]) -> Result<&[ArrayRef; N]> {
-    columns.try_into()
+    columns
+        .try_into()
         .map_err(|_| Error::IncompatibleStructWidth {
             expected: 1,
             provided: columns.len(),

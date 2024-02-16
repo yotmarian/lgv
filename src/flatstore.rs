@@ -1,11 +1,13 @@
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write, Read, Seek, SeekFrom};
-use std::marker::PhantomData;
-use std::mem::{size_of, align_of};
-use std::ops::Deref;
-use std::path::Path;
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    marker::PhantomData,
+    mem::{align_of, size_of},
+    ops::Deref,
+    path::Path,
+};
 
-use anyhow::{Result, Context, anyhow};
+use anyhow::{anyhow, Context, Result};
 use log::info;
 use zerocopy::{AsBytes, FromBytes};
 
@@ -22,14 +24,15 @@ impl<T: AsBytes> Writer<T> {
                     .append(true)
                     .create(true)
                     .open(path)
-                    .context("flatstore open writer")?
+                    .context("flatstore open writer")?,
             ),
             PhantomData,
         ))
     }
 
     pub fn write(&mut self, value: &T) -> Result<()> {
-        self.0.write_all(value.as_bytes())
+        self.0
+            .write_all(value.as_bytes())
             .context("flatstore write")
     }
 }
@@ -37,7 +40,7 @@ impl<T: AsBytes> Writer<T> {
 
 pub struct Reader<T>(File, PhantomData<fn() -> T>);
 
-impl<T: AsBytes + FromBytes> Reader<T> {
+impl<T: AsBytes+FromBytes> Reader<T> {
     pub fn open(path: &Path) -> Result<Self> {
         info!("Opening flatstore {path:?} for reading");
 
@@ -55,17 +58,17 @@ impl<T: AsBytes + FromBytes> Reader<T> {
     }
 
     pub fn size(&mut self) -> Result<u64> {
-        let bytes = self.0.seek(SeekFrom::End(0))
-            .context("flatstore size")?;
-
+        let bytes = self.0.seek(SeekFrom::End(0)).context("flatstore size")?;
         Ok(bytes / size_of::<T>() as u64)
     }
 
     pub fn read(&mut self, idx: u64, buf: &mut T) -> Result<()> {
-        self.0.seek(SeekFrom::Start(idx * size_of::<T>() as u64))
+        self.0
+            .seek(SeekFrom::Start(idx * size_of::<T>() as u64))
             .context("flatstore seek")?;
 
-        self.0.read_exact(buf.as_bytes_mut())
+        self.0
+            .read_exact(buf.as_bytes_mut())
             .context("flatstore read")
     }
 }
@@ -88,7 +91,9 @@ impl<T> Mmap<T> {
         );
 
         if mmap.0.len() % size_of::<T>() != 0 {
-            Err(anyhow!("flatstore: file size is not a multiple of record len"))
+            Err(anyhow!(
+                "flatstore: file size is not a multiple of record len"
+            ))
         } else if !mmap.0.as_ptr().is_aligned_to(align_of::<T>()) {
             Err(anyhow!("flatstore: mmap is not properly aligned"))
         } else {

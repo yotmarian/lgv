@@ -1,17 +1,11 @@
-use std::borrow::Cow;
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{borrow::Cow, marker::PhantomData, rc::Rc, sync::Arc};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use arrow::array as aa;
-use duckdb::Connection;
-use duckdb::types::ToSqlOutput;
+pub use duckdb::types::{Null, ValueRef};
+use duckdb::{types::ToSqlOutput, Connection};
 
 use crate::arrow::{Array, FromArrow, Iter};
-
-pub use duckdb::types::ValueRef;
-pub use duckdb::types::Null;
 
 pub trait Spec: Sized {
     type Params<'a>: Params = ();
@@ -22,15 +16,24 @@ pub trait Spec: Sized {
         Statement::<Self>::new(conn)?.execute(params)
     }
 
-    fn select_row(conn: &Connection, params: Self::Params<'_>) -> Result<Self::Results> {
+    fn select_row(
+        conn: &Connection,
+        params: Self::Params<'_>,
+    ) -> Result<Self::Results> {
         Select::<Self>::new(conn)?.select_row(params)
     }
 
-    fn select_vec(conn: &Connection, params: Self::Params<'_>) -> Result<Vec<Self::Results>> {
+    fn select_vec(
+        conn: &Connection,
+        params: Self::Params<'_>,
+    ) -> Result<Vec<Self::Results>> {
         Select::<Self>::new(conn)?.select_vec(params)
     }
 
-    fn select_n<const N: usize>(conn: &Connection, params: Self::Params<'_>) -> Result<[Self::Results; N]> {
+    fn select_n<const N: usize>(
+        conn: &Connection,
+        params: Self::Params<'_>,
+    ) -> Result<[Self::Results; N]> {
         Select::<Self>::new(conn)?.select_n(params)
     }
 }
@@ -58,7 +61,10 @@ pub struct Statement<'conn, S> {
 impl<'conn, S: Spec> Statement<'conn, S> {
     pub fn new(conn: &'conn Connection) -> Result<Statement<'conn, S>> {
         let duck = conn.prepare(S::SQL).context(S::SQL)?;
-        Ok(Statement { duck, phantom: PhantomData })
+        Ok(Statement {
+            duck,
+            phantom: PhantomData,
+        })
     }
 
     pub fn execute(&mut self, params: S::Params<'_>) -> Result<usize> {
@@ -77,7 +83,10 @@ pub struct Insert<'conn, S> {
 
 impl<'conn, S: Spec> Insert<'conn, S> {
     pub fn new(conn: &'conn Connection) -> Result<Insert<'conn, S>> {
-        Ok(Insert { conn, statement: Statement::new(conn)? })
+        Ok(Insert {
+            conn,
+            statement: Statement::new(conn)?,
+        })
     }
 
     pub fn insert(&mut self, params: S::Params<'_>) -> Result<usize> {
@@ -109,7 +118,10 @@ impl<'conn, S: Spec> Select<'conn, S> {
         Ok(Select(Statement::new(conn)?))
     }
 
-    pub fn select(&mut self, params: S::Params<'_>) -> Result<QueryResults<'_, 'conn, S::Results>> {
+    pub fn select(
+        &mut self,
+        params: S::Params<'_>,
+    ) -> Result<QueryResults<'_, 'conn, S::Results>> {
         self.0.execute(params)?;
 
         Ok(QueryResults {
@@ -126,18 +138,26 @@ impl<'conn, S: Spec> Select<'conn, S> {
         }
     }
 
-    pub fn select_vec(&mut self, params: S::Params<'_>) -> Result<Vec<S::Results>> {
+    pub fn select_vec(
+        &mut self,
+        params: S::Params<'_>,
+    ) -> Result<Vec<S::Results>> {
         self.select(params)?.try_collect()
     }
 
-    pub fn select_n<const N: usize>(&mut self, params: S::Params<'_>) -> Result<[S::Results; N]> {
+    pub fn select_n<const N: usize>(
+        &mut self,
+        params: S::Params<'_>,
+    ) -> Result<[S::Results; N]> {
         let mut iter = self.select(params)?;
 
         std::array::try_from_fn(|i| {
-            iter.next().ok_or_else(
-                || anyhow!("Not enough rows (expected: {N}, provided: {i})")
-                    .context(S::SQL)
-            ).flatten()
+            iter.next()
+                .ok_or_else(|| {
+                    anyhow!("Not enough rows (expected: {N}, provided: {i})")
+                        .context(S::SQL)
+                })
+                .flatten()
         })
     }
 }
@@ -236,31 +256,31 @@ impl<T: ToSql> ToSql for Option<T> {
     }
 }
 
-impl<T: ToSql + ?Sized> ToSql for &T {
+impl<T: ToSql+?Sized> ToSql for &T {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql + ?Sized> ToSql for Box<T> {
+impl<T: ToSql+?Sized> ToSql for Box<T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql + ?Sized> ToSql for Rc<T> {
+impl<T: ToSql+?Sized> ToSql for Rc<T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql + ?Sized> ToSql for Arc<T> {
+impl<T: ToSql+?Sized> ToSql for Arc<T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql + ToOwned + ?Sized> ToSql for Cow<'_, T> {
+impl<T: ToSql+ToOwned+?Sized> ToSql for Cow<'_, T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
@@ -311,7 +331,11 @@ pub struct Binder<'a, 'conn> {
 
 impl<'a, 'conn> Binder<'a, 'conn> {
     fn new(statement: &'a mut duckdb::Statement<'conn>, sql: &'a str) -> Self {
-        Binder { statement, column: 1, sql }
+        Binder {
+            statement,
+            column: 1,
+            sql,
+        }
     }
 
     pub fn bind<T: ToSql>(&mut self, value: T) -> Result<()> {
@@ -319,7 +343,8 @@ impl<'a, 'conn> Binder<'a, 'conn> {
     }
 
     pub fn bind_value_ref(&mut self, value_ref: ValueRef) -> Result<()> {
-        self.statement.raw_bind_parameter(self.column, StraightToSql(value_ref))
+        self.statement
+            .raw_bind_parameter(self.column, StraightToSql(value_ref))
             .with_context(|| format!("Column {}", self.column))
             .with_context(|| String::from(self.sql))?;
 
@@ -349,7 +374,7 @@ impl<T: ToSql> Params for T {
 macro_rules! gen_tuple_params {
     { $( ($($x:ident),* $(,)?) )+ } => { $(
         #[allow(non_snake_case)]
-        impl<$($x: ToSql),*> Params for ($($x,)*) {            
+        impl<$($x: ToSql),*> Params for ($($x,)*) {
             fn bind_to(self, binder: &mut Binder) -> Result<()> {
                 let ($($x,)*) = self;
                 $(binder.bind($x)?;)*

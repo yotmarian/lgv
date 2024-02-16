@@ -2,8 +2,10 @@ use arrow::datatypes::*;
 use chrono::{DateTime, TimeZone};
 use duckdb::types as dt;
 
-use crate::arrow::Primitive;
-use crate::duckdb::{ToSql, ValueRef};
+use crate::{
+    arrow::Primitive,
+    duckdb::{ToSql, ValueRef},
+};
 
 pub const MICROSECONDS_IN_SECOND: i64 = 1_000_000;
 
@@ -34,8 +36,13 @@ impl<T> From<T> for Date<T> {
     }
 }
 
-impl Primitive for Date<i32> { type Arrow = Date32Type; }
-impl Primitive for Date<i64> { type Arrow = Date64Type; }
+impl Primitive for Date<i32> {
+    type Arrow = Date32Type;
+}
+
+impl Primitive for Date<i64> {
+    type Arrow = Date64Type;
+}
 
 impl ToSql for Date<i32> {
     fn to_sql(&self) -> ValueRef {
@@ -93,23 +100,31 @@ pub struct YearMonth;
 pub struct DayTime;
 pub struct MonthDayNano;
 
-impl IntervalUnit for YearMonth { type Interval = IntervalYearMonthType; }
-impl IntervalUnit for DayTime { type Interval = IntervalDayTimeType; }
-impl IntervalUnit for MonthDayNano { type Interval = IntervalMonthDayNanoType; }
+impl IntervalUnit for YearMonth {
+    type Interval = IntervalYearMonthType;
+}
 
-pub struct Timestamp<T: TimeUnit = Microsecond>(
+impl IntervalUnit for DayTime {
+    type Interval = IntervalDayTimeType;
+}
+
+impl IntervalUnit for MonthDayNano {
+    type Interval = IntervalMonthDayNanoType;
+}
+
+pub struct Timestamp<T: TimeUnit=Microsecond>(
     pub <T::Timestamp as ArrowPrimitiveType>::Native,
 );
 
-pub struct Time<T: TimeUnit = Microsecond>(
+pub struct Time<T: TimeUnit=Microsecond>(
     pub <T::Time as ArrowPrimitiveType>::Native,
 );
 
-pub struct Duration<T: TimeUnit = Microsecond>(
+pub struct Duration<T: TimeUnit=Microsecond>(
     pub <T::Duration as ArrowPrimitiveType>::Native,
 );
 
-pub struct Interval<T: IntervalUnit = DayTime>(
+pub struct Interval<T: IntervalUnit=DayTime>(
     pub <T::Interval as ArrowPrimitiveType>::Native,
 );
 
@@ -117,7 +132,7 @@ impl<N, T> From<N> for Timestamp<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
-    T::Timestamp: ArrowPrimitiveType<Native=N>
+    T::Timestamp: ArrowPrimitiveType<Native=N>,
 {
     fn from(value: N) -> Self {
         Timestamp(value)
@@ -128,7 +143,7 @@ impl<N, T> From<N> for Time<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
-    T::Time: ArrowPrimitiveType<Native=N>
+    T::Time: ArrowPrimitiveType<Native=N>,
 {
     fn from(value: N) -> Self {
         Time(value)
@@ -139,7 +154,7 @@ impl<N, T> From<N> for Duration<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
-    T::Duration: ArrowPrimitiveType<Native=N>
+    T::Duration: ArrowPrimitiveType<Native=N>,
 {
     fn from(value: N) -> Self {
         Duration(value)
@@ -150,17 +165,28 @@ impl<N, T> From<N> for Interval<T>
 where
     N: ArrowNativeType,
     T: IntervalUnit,
-    T::Interval: ArrowPrimitiveType<Native=N>
+    T::Interval: ArrowPrimitiveType<Native=N>,
 {
     fn from(value: N) -> Self {
         Interval(value)
     }
 }
 
-impl<T: TimeUnit> Primitive for Timestamp<T> { type Arrow = T::Timestamp; }
-impl<T: TimeUnit> Primitive for Time<T> { type Arrow = T::Time; }
-impl<T: TimeUnit> Primitive for Duration<T> { type Arrow = T::Duration; }
-impl<T: IntervalUnit> Primitive for Interval<T> { type Arrow = T::Interval; }
+impl<T: TimeUnit> Primitive for Timestamp<T> {
+    type Arrow = T::Timestamp;
+}
+
+impl<T: TimeUnit> Primitive for Time<T> {
+    type Arrow = T::Time;
+}
+
+impl<T: TimeUnit> Primitive for Duration<T> {
+    type Arrow = T::Duration;
+}
+
+impl<T: IntervalUnit> Primitive for Interval<T> {
+    type Arrow = T::Interval;
+}
 
 impl<T: TimeUnit> ToSql for Timestamp<T>
 where
