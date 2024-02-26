@@ -40,7 +40,7 @@ impl<T: AsBytes> Writer<T> {
 
 pub struct Reader<T>(File, PhantomData<fn() -> T>);
 
-impl<T: AsBytes+FromBytes> Reader<T> {
+impl<T: AsBytes + FromBytes> Reader<T> {
     pub fn open(path: &Path) -> Result<Self> {
         info!("Opening flatstore {path:?} for reading");
 

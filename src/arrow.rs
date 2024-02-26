@@ -108,7 +108,7 @@ impl<T: Primitive> DirectFromArrow for T {
 // -----------------------------------------------------------------------------
 
 pub trait Primitive:
-    From<<Self::Arrow as ArrowPrimitiveType>::Native>+'static
+    From<<Self::Arrow as ArrowPrimitiveType>::Native> + 'static
 {
     type Arrow: ArrowPrimitiveType;
 }
@@ -165,7 +165,7 @@ impl<T: FromArrow> ExactSizeIterator for Iter<T> {
 
 // -----------------------------------------------------------------------------
 
-pub trait Array: Clone+Send+Sync+'static {
+pub trait Array: Clone + Send + Sync + 'static {
     type Item<'a>;
 
     fn len(&self) -> usize;
@@ -464,7 +464,7 @@ impl<O: OffsetSizeTrait, A: Array> GenericListArray<O, A> {
         start .. end
     }
 
-    fn sizes(&self) -> impl Iterator<Item=usize>+'_ {
+    fn sizes(&self) -> impl Iterator<Item = usize> + '_ {
         self.offsets
             .iter()
             .map_windows(|&[c, n]| n.as_usize() - c.as_usize())
@@ -482,7 +482,7 @@ impl<O: OffsetSizeTrait, A: Array> GenericListArray<O, A> {
     }
 }
 
-impl<O: OffsetSizeTrait, A: Array+Debug> Debug for GenericListArray<O, A> {
+impl<O: OffsetSizeTrait, A: Array + Debug> Debug for GenericListArray<O, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GenericListArray")
             .field("inner", &self.inner)
@@ -566,7 +566,7 @@ impl<A: Array> Array for FixedSizeListArray<A> {
         let s = self.size as usize;
 
         Self {
-            len: len,
+            len,
             size: self.size,
             inner: self.inner.slice(offset * s, len * s),
         }
@@ -761,7 +761,7 @@ impl<T> Array for PrimitiveListArray<T>
 where
     T: Primitive,
     T: ArrowNativeType,
-    T::Arrow: ArrowPrimitiveType<Native=T>,
+    T::Arrow: ArrowPrimitiveType<Native = T>,
 {
     type Item<'a> = &'a [T];
 
@@ -816,7 +816,7 @@ impl<T, const N: usize> Array for LenientFixedSizePrimitiveListArray<T, N>
 where
     T: Primitive,
     T: ArrowNativeType,
-    T::Arrow: ArrowPrimitiveType<Native=T>,
+    T::Arrow: ArrowPrimitiveType<Native = T>,
 {
     type Item<'a> = &'a [T; N];
 
@@ -847,7 +847,7 @@ where
 
 // -----------------------------------------------------------------------------
 
-type Result<T, E=Error> = std::result::Result<T, E>;
+type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 pub enum Error {

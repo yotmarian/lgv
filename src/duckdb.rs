@@ -95,7 +95,7 @@ impl<'conn, S: Spec> Insert<'conn, S> {
 
     pub fn insert_many<'a>(
         &mut self,
-        rows: impl IntoIterator<Item=S::Params<'a>>,
+        rows: impl IntoIterator<Item = S::Params<'a>>,
     ) -> Result<usize> {
         let mut affected_rows = 0;
         let tx = self.conn.unchecked_transaction()?;
@@ -194,7 +194,7 @@ impl<'a, 'conn, R: Results> Iterator for QueryResults<'a, 'conn, R> {
 // -----------------------------------------------------------------------------
 
 pub trait Results {
-    type Iter: Iterator<Item=Self>;
+    type Iter: Iterator<Item = Self>;
 
     fn batch_iter(array: aa::StructArray) -> Result<Self::Iter>;
 }
@@ -256,31 +256,31 @@ impl<T: ToSql> ToSql for Option<T> {
     }
 }
 
-impl<T: ToSql+?Sized> ToSql for &T {
+impl<T: ToSql + ?Sized> ToSql for &T {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql+?Sized> ToSql for Box<T> {
+impl<T: ToSql + ?Sized> ToSql for Box<T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql+?Sized> ToSql for Rc<T> {
+impl<T: ToSql + ?Sized> ToSql for Rc<T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql+?Sized> ToSql for Arc<T> {
+impl<T: ToSql + ?Sized> ToSql for Arc<T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }
 }
 
-impl<T: ToSql+ToOwned+?Sized> ToSql for Cow<'_, T> {
+impl<T: ToSql + ToOwned + ?Sized> ToSql for Cow<'_, T> {
     fn to_sql(&self) -> ValueRef {
         T::to_sql(self)
     }

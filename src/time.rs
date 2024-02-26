@@ -112,19 +112,19 @@ impl IntervalUnit for MonthDayNano {
     type Interval = IntervalMonthDayNanoType;
 }
 
-pub struct Timestamp<T: TimeUnit=Microsecond>(
+pub struct Timestamp<T: TimeUnit = Microsecond>(
     pub <T::Timestamp as ArrowPrimitiveType>::Native,
 );
 
-pub struct Time<T: TimeUnit=Microsecond>(
+pub struct Time<T: TimeUnit = Microsecond>(
     pub <T::Time as ArrowPrimitiveType>::Native,
 );
 
-pub struct Duration<T: TimeUnit=Microsecond>(
+pub struct Duration<T: TimeUnit = Microsecond>(
     pub <T::Duration as ArrowPrimitiveType>::Native,
 );
 
-pub struct Interval<T: IntervalUnit=DayTime>(
+pub struct Interval<T: IntervalUnit = DayTime>(
     pub <T::Interval as ArrowPrimitiveType>::Native,
 );
 
@@ -132,7 +132,7 @@ impl<N, T> From<N> for Timestamp<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
-    T::Timestamp: ArrowPrimitiveType<Native=N>,
+    T::Timestamp: ArrowPrimitiveType<Native = N>,
 {
     fn from(value: N) -> Self {
         Timestamp(value)
@@ -143,7 +143,7 @@ impl<N, T> From<N> for Time<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
-    T::Time: ArrowPrimitiveType<Native=N>,
+    T::Time: ArrowPrimitiveType<Native = N>,
 {
     fn from(value: N) -> Self {
         Time(value)
@@ -154,7 +154,7 @@ impl<N, T> From<N> for Duration<T>
 where
     N: ArrowNativeType,
     T: TimeUnit,
-    T::Duration: ArrowPrimitiveType<Native=N>,
+    T::Duration: ArrowPrimitiveType<Native = N>,
 {
     fn from(value: N) -> Self {
         Duration(value)
@@ -165,7 +165,7 @@ impl<N, T> From<N> for Interval<T>
 where
     N: ArrowNativeType,
     T: IntervalUnit,
-    T::Interval: ArrowPrimitiveType<Native=N>,
+    T::Interval: ArrowPrimitiveType<Native = N>,
 {
     fn from(value: N) -> Self {
         Interval(value)
