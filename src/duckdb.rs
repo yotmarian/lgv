@@ -287,7 +287,7 @@ impl<T: ToSql + ToOwned + ?Sized> ToSql for Cow<'_, T> {
 }
 
 macro_rules! impl_to_sql {
-    { $( $c:ident($p:ty), )+ } => { $(
+    { $( $p:ty: $c:ident )+ } => { $(
         impl ToSql for $p {
             fn to_sql(&self) -> ValueRef {
                 ValueRef::$c(*self)
@@ -297,18 +297,10 @@ macro_rules! impl_to_sql {
 }
 
 impl_to_sql! {
-    Boolean(bool),
-    TinyInt(i8),
-    SmallInt(i16),
-    Int(i32),
-    BigInt(i64),
-    HugeInt(i128),
-    UTinyInt(u8),
-    USmallInt(u16),
-    UInt(u32),
-    UBigInt(u64),
-    Float(f32),
-    Double(f64),
+    bool:Boolean
+    i8:TinyInt i16:SmallInt i32:Int i64:BigInt i128:HugeInt
+    u8:UTinyInt u16:USmallInt u32:UInt u64:UBigInt
+    f32:Float f64:Double
 }
 
 // -----------------------------------------------------------------------------
@@ -371,7 +363,7 @@ impl<T: ToSql> Params for T {
     }
 }
 
-macro_rules! gen_tuple_params {
+macro_rules! impl_params {
     { $( ($($x:ident),* $(,)?) )+ } => { $(
         #[allow(non_snake_case)]
         impl<$($x: ToSql),*> Params for ($($x,)*) {
@@ -384,7 +376,7 @@ macro_rules! gen_tuple_params {
     )+ };
 }
 
-gen_tuple_params! {
+impl_params! {
     (A,)
     (A, B)
     (A, B, C)

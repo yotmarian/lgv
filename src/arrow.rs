@@ -37,7 +37,7 @@ impl<T: FromArrow> FromArrow for Option<T> {
 }
 
 macro_rules! impl_from_arrow_tuple {
-    { $( ($($x:ident), +$(,)?) <- $struct:ident )+ } => { $(
+    { $( ($($x:ident), +$(,)?): $struct:ident )+ } => { $(
         #[allow(non_snake_case, unused_parens)]
         impl<$($x: FromArrow),+> FromArrow for ($($x,)+) {
             type Array = $struct<$($x::Array),+>;
@@ -51,18 +51,18 @@ macro_rules! impl_from_arrow_tuple {
 }
 
 impl_from_arrow_tuple! {
-    (A,) <- Struct1Array
-    (A, B) <- Struct2Array
-    (A, B, C) <- Struct3Array
-    (A, B, C, D) <- Struct4Array
-    (A, B, C, D, E) <- Struct5Array
-    (A, B, C, D, E, F) <- Struct6Array
-    (A, B, C, D, E, F, G) <- Struct7Array
-    (A, B, C, D, E, F, G, H) <- Struct8Array
-    (A, B, C, D, E, F, G, H, I) <- Struct9Array
-    (A, B, C, D, E, F, G, H, I, J) <- Struct10Array
-    (A, B, C, D, E, F, G, H, I, J, K) <- Struct11Array
-    (A, B, C, D, E, F, G, H, I, J, K, L) <- Struct12Array
+    (A,): Struct1Array
+    (A, B): Struct2Array
+    (A, B, C): Struct3Array
+    (A, B, C, D): Struct4Array
+    (A, B, C, D, E): Struct5Array
+    (A, B, C, D, E, F): Struct6Array
+    (A, B, C, D, E, F, G): Struct7Array
+    (A, B, C, D, E, F, G, H): Struct8Array
+    (A, B, C, D, E, F, G, H, I): Struct9Array
+    (A, B, C, D, E, F, G, H, I, J): Struct10Array
+    (A, B, C, D, E, F, G, H, I, J, K): Struct11Array
+    (A, B, C, D, E, F, G, H, I, J, K, L): Struct12Array
 }
 
 // -----------------------------------------------------------------------------
@@ -73,32 +73,20 @@ pub trait DirectFromArrow:
     type Array: Array;
 }
 
-impl DirectFromArrow for () {
-    type Array = UnitArray;
+macro_rules! impl_direct_from_arrow {
+    { $($native:ty: $arrow:ty)+ } => { $(
+        impl DirectFromArrow for $native { type Array = $arrow; }
+    )+ };
 }
 
-impl DirectFromArrow for bool {
-    type Array = BooleanArray;
-}
-
-impl DirectFromArrow for Box<str> {
-    type Array = StringArray;
-}
-
-impl DirectFromArrow for String {
-    type Array = StringArray;
-}
-
-impl DirectFromArrow for PathBuf {
-    type Array = StringArray;
-}
-
-impl DirectFromArrow for Box<[u8]> {
-    type Array = BinaryArray;
-}
-
-impl DirectFromArrow for Vec<u8> {
-    type Array = BinaryArray;
+impl_direct_from_arrow! {
+    (): UnitArray
+    bool: BooleanArray
+    Box<str>: StringArray
+    String: StringArray
+    PathBuf: StringArray
+    Box<[u8]>: BinaryArray
+    Vec<u8>: BinaryArray
 }
 
 impl<T: Primitive> DirectFromArrow for T {
@@ -114,9 +102,9 @@ pub trait Primitive:
 }
 
 macro_rules! impl_primitive {
-    { $($native:ty:$arrow:ty)+ } => {
-        $(impl Primitive for $native { type Arrow = $arrow; })+
-    };
+    { $( $native:ty: $arrow:ty )+ } => { $(
+        impl Primitive for $native { type Arrow = $arrow; }
+    )+ };
 }
 
 impl_primitive! {
@@ -172,7 +160,6 @@ pub trait Array: Clone + Send + Sync + 'static {
     fn slice(&self, offset: usize, len: usize) -> Self;
     fn nullable_from_arrow(arrow: &dyn aa::Array) -> Result<Nullable<Self>>;
     fn index(&self, i: usize) -> Self::Item<'_>;
-
 
     fn from_arrow(arrow: &dyn aa::Array) -> Result<Self> {
         Self::nullable_from_arrow(arrow)?.null_check()
@@ -588,61 +575,70 @@ impl<A: Array> Array for FixedSizeListArray<A> {
 
 // -----------------------------------------------------------------------------
 
-macro_rules! gen_struct_arrays { { $( $name:ident<$($x:ident),+> )+ } => { $(
-    #[derive(Debug, Clone)]
-    pub struct $name<$($x),+> {
-        len: usize,
-        columns: ($($x,)+),
-    }
-
-    #[allow(non_snake_case)]
-    impl<$($x: Array),+> $name<$($x),+> {
-        fn new(len: usize, columns: &[ArrayRef]) -> Result<Self> {
-            let [$($x),+] = n_columns(columns)?;
-            Ok(Self {
-                len,
-                columns: ($($x::from_arrow($x)?,)+),
-            })
-        }
-    }
-
-    #[allow(unused_parens, non_snake_case)]
-    impl<$($x: Array),+> Array for $name<$($x),+> {
-        type Item<'a> = ($($x::Item<'a>),+);
-
-        fn len(&self) -> usize {
-            self.len
+macro_rules! gen_struct_arrays {
+    { $( $name:ident<$($x:ident),+> )+ } => { $(
+        #[derive(Debug, Clone)]
+        pub struct $name<$($x),+> {
+            len: usize,
+            columns: ($($x,)+),
         }
 
-        fn slice(&self, offset: usize, len: usize) -> Self {
-            let ($($x,)+) = &self.columns;
-
-            Self {
-                len,
-                columns: ($($x.slice(offset, len),)+),
+        #[allow(non_snake_case)]
+        impl<$($x: Array),+> $name<$($x),+> {
+            fn new(len: usize, columns: &[ArrayRef]) -> Result<Self> {
+                let [$($x),+] = n_columns(columns)?;
+                Ok(Self {
+                    len,
+                    columns: ($($x::from_arrow($x)?,)+),
+                })
             }
         }
 
-        fn nullable_from_arrow(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
-            let arrow: &aa::StructArray = downcast(arrow)?;
-            let nulls = clone_nulls(arrow);
-            Ok(Nullable(Self::new(aa::Array::len(arrow), arrow.columns())?, nulls))
-        }
+        #[allow(unused_parens, non_snake_case)]
+        impl<$($x: Array),+> Array for $name<$($x),+> {
+            type Item<'a> = ($($x::Item<'a>),+);
 
-        fn from_arrow_batch(arrow: &RecordBatch) -> Result<Self> {
-            Self::new(arrow.num_rows(), arrow.columns())
-        }
+            fn len(&self) -> usize {
+                self.len
+            }
 
-        fn nullable_from_arrow_batch(arrow: &RecordBatch) -> Result<Nullable<Self>> {
-            Ok(Nullable(Self::from_arrow_batch(arrow)?, None))
-        }
+            fn slice(&self, offset: usize, len: usize) -> Self {
+                let ($($x,)+) = &self.columns;
 
-        fn index(&self, i: usize) -> Self::Item<'_> {
-            let ($($x,)+) = &self.columns;
-            ($($x.index(i)),+)
+                Self {
+                    len,
+                    columns: ($($x.slice(offset, len),)+),
+                }
+            }
+
+            fn nullable_from_arrow(
+                arrow: &dyn aa::Array,
+            ) -> Result<Nullable<Self>> {
+                let arrow: &aa::StructArray = downcast(arrow)?;
+                let nulls = clone_nulls(arrow);
+                Ok(Nullable(
+                    Self::new(aa::Array::len(arrow), arrow.columns())?,
+                    nulls,
+                ))
+            }
+
+            fn from_arrow_batch(arrow: &RecordBatch) -> Result<Self> {
+                Self::new(arrow.num_rows(), arrow.columns())
+            }
+
+            fn nullable_from_arrow_batch(
+                arrow: &RecordBatch,
+            ) -> Result<Nullable<Self>> {
+                Ok(Nullable(Self::from_arrow_batch(arrow)?, None))
+            }
+
+            fn index(&self, i: usize) -> Self::Item<'_> {
+                let ($($x,)+) = &self.columns;
+                ($($x.index(i)),+)
+            }
         }
-    }
-)+ }; }
+    )+ };
+}
 
 gen_struct_arrays! {
     Struct1Array<A>
@@ -662,7 +658,7 @@ gen_struct_arrays! {
 // -----------------------------------------------------------------------------
 
 macro_rules! gen_one_ofs {
-    { $($name:ident<$x:ident, $($xs:ident),+>)+ } => { $(
+    { $( $name:ident<$x:ident, $($xs:ident),+> )+ } => { $(
         #[derive(Debug, Clone)]
         pub enum $name<$x, $($xs),+> {
             $x($x),
@@ -690,7 +686,9 @@ macro_rules! gen_one_ofs {
                 }
             }
 
-            fn nullable_from_arrow(arrow: &dyn aa::Array) -> Result<Nullable<Self>> {
+            fn nullable_from_arrow(
+                arrow: &dyn aa::Array,
+            ) -> Result<Nullable<Self>> {
                 let $x = match $x::nullable_from_arrow(arrow) {
                     Ok(x) => return Ok(x.map(Self::$x)),
                     Err(e) => e,
