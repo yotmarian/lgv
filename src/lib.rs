@@ -3,7 +3,7 @@
 #![feature(iter_map_windows)]
 #![feature(iterator_try_collect)]
 #![feature(never_type)]
-#![feature(pointer_is_aligned)]
+#![feature(pointer_is_aligned_to)]
 #![feature(result_flattening)]
 
 pub mod arrow;

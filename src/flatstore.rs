@@ -9,12 +9,12 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use log::info;
-use zerocopy::{AsBytes, FromBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 
 pub struct Writer<T>(BufWriter<File>, PhantomData<fn(T)>);
 
-impl<T: AsBytes> Writer<T> {
+impl<T: IntoBytes + Immutable> Writer<T> {
     pub fn open(path: &Path) -> Result<Self> {
         info!("Opening flatstore {path:?} for writing");
 
@@ -40,7 +40,7 @@ impl<T: AsBytes> Writer<T> {
 
 pub struct Reader<T>(File, PhantomData<fn() -> T>);
 
-impl<T: AsBytes + FromBytes> Reader<T> {
+impl<T: IntoBytes + FromBytes> Reader<T> {
     pub fn open(path: &Path) -> Result<Self> {
         info!("Opening flatstore {path:?} for reading");
 
@@ -68,7 +68,7 @@ impl<T: AsBytes + FromBytes> Reader<T> {
             .context("flatstore seek")?;
 
         self.0
-            .read_exact(buf.as_bytes_mut())
+            .read_exact(buf.as_mut_bytes())
             .context("flatstore read")
     }
 }
@@ -102,11 +102,11 @@ impl<T> Mmap<T> {
     }
 }
 
-impl<T: FromBytes> Deref for Mmap<T> {
+impl<T: FromBytes + Immutable> Deref for Mmap<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        FromBytes::slice_from(&self.0)
+        <[T] as FromBytes>::ref_from_bytes(&self.0)
             .expect("flatstore: invariants broken since opened")
     }
 }
